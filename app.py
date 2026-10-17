@@ -4,183 +4,250 @@ from google.genai import types
 import json
 import os
 
-# --- 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN) ---
-st.set_page_config(page_title="AI Marketing Command Center", page_icon="⚡", layout="wide")
+# =========================================================
+# 1. TETAPAN HALAMAN & KAWALAN AKSES (LOGIN)
+# =========================================================
+st.set_page_config(page_title="Pro Marketing Command Center", page_icon="⚡", layout="wide")
 
-# Sistem kata laluan mudah agar orang luar tidak curi kuota Gemini anda
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "admin123")
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.title("🔒 Log Masuk AI Marketing Hub")
-    pwd_input = st.text_input("Masukkan Kata Laluan Akses:", type="password")
-    if st.button("Masuk"):
+    st.title("🔒 Log Masuk Marketing Agent Hub")
+    st.info("Sila masukkan kata laluan keselamatan untuk mengakses sistem.")
+    pwd_input = st.text_input("Kata Laluan:", type="password")
+    if st.button("Log Masuk 🚀"):
         if pwd_input == APP_PASSWORD:
             st.session_state.authenticated = True
             st.rerun()
         else:
-            st.error("Kata laluan salah!")
+            st.error("Kata laluan tidak sah! Sila cuba lagi.")
     st.stop()
 
-# --- 2. SAMBUNGAN GEMINI CLIENT ---
+# =========================================================
+# 2. SAMBUNGAN GEMINI CLIENT
+# =========================================================
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 if not API_KEY:
-    st.error("Ralat: Sila tetapkan GEMINI_API_KEY di Streamlit Secrets!")
+    st.error("Ralat: GEMINI_API_KEY tidak dijumpai di Streamlit Secrets!")
     st.stop()
 
 client = genai.Client(api_key=API_KEY)
 
-# --- 3. MEMORI / PRODUCT KNOWLEDGE BASE LALAI ---
+# =========================================================
+# 3. PANGKALAN PENGETAHUAN PRODUK (DEFAULT KNOWLEDGE)
+# =========================================================
 DEFAULT_KNOWLEDGE = {
     "Tone Wow": {
-        "kategori": "Telco & Jana Pendapatan Pasif",
-        "usp": "Simkad prabayar pelan data jimat yang membayar komisen berulang apabila pengguna topup.",
-        "avatar": "Pengguna telefon yang ingin kurangkan bil bulanan & individu yang cari pendapatan sampingan.",
-        "compliance": "Dilarang janjikan pendapatan goyang kaki atau guna perkataan skim cepat kaya."
+        "kategori": "Telco & Pendapatan Pasif",
+        "usp": "Simkad prabayar pelan data jimat yang memberi insentif komisen rujukan setiap kali pengguna topup.",
+        "avatar": "Pengguna telefon pintar yang ingin kurangkan beban bil & individu mencari pendapatan sampingan.",
+        "compliance": "Dilarang janjikan pendapatan goyang kaki atau guna istilah skim cepat kaya / skim piramid."
     },
     "Eastel": {
         "kategori": "Telco Mampu Milik",
-        "usp": "Penyedia pelan internet pantas dengan kuota besar pada harga marhaen.",
-        "avatar": "Pelajar universiti, pekerja gig, dan keluarga bajet.",
-        "compliance": "Fokus pada kestabilan liputan dan penjimatan wang."
+        "usp": "Penyedia pelan internet pantas dengan kuota besar pada kadar mampu milik mesra poket.",
+        "avatar": "Pelajar, penghantar makanan / gig workers, dan keluarga yang mengutamakan penjimatan.",
+        "compliance": "Fokus pada kestabilan liputan dan penjimatan kos bulanan."
     },
     "Produk AI": {
-        "kategori": "Perisian & Automasi AI",
-        "usp": "Membantu usahawan menjimatkan masa copywriting, grafik, dan khidmat pelanggan dengan ejen AI.",
-        "avatar": "Pemilik bisnes SME, agensi pemasaran, dan freelancer.",
-        "compliance": "Jangan overclaim bahawa AI 100% menggantikan manusia tanpa semakan fakta."
+        "kategori": "Automasi & Perisian AI",
+        "usp": "Sistem ejen pintar untuk automasi copywriting, analisis data, dan sokongan pemasaran bisnes.",
+        "avatar": "Pemilik bisnes PKS, usahawan solo, dan pencipta kandungan digital.",
+        "compliance": "Jangan buat kenyataan palsu (overclaim) bahawa AI menggantikan 100% manusia tanpa semakan fakta."
     },
     "BeliBeliOnline": {
-        "kategori": "E-Commerce & Marketplace Tempatan",
-        "usp": "Platform beli-belah lokal mesra usahawan PKS dengan caj komisen rendah dan sokongan komuniti.",
-        "avatar": "Peniaga kecil IKS di Malaysia dan pembeli barangan tempatan.",
-        "compliance": "Jangan burukkan platform lain; fokus pada sokongan ekonomi peniaga tempatan."
+        "kategori": "Marketplace & E-Commerce Tempatan",
+        "usp": "Platform e-dagang tempatan mesra peniaga kecil dengan kadar komisen adil dan sokongan komuniti usahawan.",
+        "avatar": "Peniaga kecil IKS tempatan dan pembeli barangan buatan Malaysia.",
+        "compliance": "Elakkan membuat perbandingan agresif atau memburukkan platform e-commerce lain."
     }
 }
 
-# --- 4. ANTARAMUKA PENGGUNA (SIDEBAR & MEMORI) ---
-st.sidebar.title("🎛️ Pengurusan Produk")
+# =========================================================
+# 4. INISIALISASI MEMORI SESI (SESSION STATE)
+# =========================================================
+if "research_store" not in st.session_state:
+    st.session_state.research_store = {}  # Memori L1 bagi setiap produk
+if "content_history" not in st.session_state:
+    st.session_state.content_history = [] # Sejarah draf L2 & laporan L3
+
+# =========================================================
+# 5. SIDEBAR: PEMILIHAN PRODUK & KEMAS KINI PDF
+# =========================================================
+st.sidebar.title("🎛️ Pusat Kawalan Produk")
 selected_product = st.sidebar.selectbox("Pilih Produk:", list(DEFAULT_KNOWLEDGE.keys()))
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Kemas Kini Pengetahuan (PDF)")
-uploaded_pdf = st.sidebar.file_uploader(f"Muat naik dokumen terkini ({selected_product})", type=["pdf"])
+st.sidebar.subheader("📄 Kemas Kini Pengetahuan Terkini")
+uploaded_pdf = st.sidebar.file_uploader(f"Muat naik PDF baru ({selected_product})", type=["pdf"])
 
-# Papar info sedia ada
 product_info = DEFAULT_KNOWLEDGE[selected_product]
-with st.sidebar.expander("Lihat Ringkasan Pengetahuan Produk"):
+with st.sidebar.expander("📌 Info Asas Produk"):
     st.write(f"**USP:** {product_info['usp']}")
-    st.write(f"**Target:** {product_info['avatar']}")
-    st.write(f"**Pantang Larang:** {product_info['compliance']}")
+    st.write(f"**Sasaran:** {product_info['avatar']}")
+    st.write(f"**Pematuhan:** {product_info['compliance']}")
 
-# --- 5. LOGIK MULTI-AGENT (ORCHESTRATOR -> RESEARCH -> CONTENT -> QA) ---
-def run_pipeline(product_name, base_info, pdf_file, objective):
-    pdf_attachment = None
-    if pdf_file is not None:
-        # Simpan fail sementara untuk dimuat naik ke Gemini
-        temp_path = f"temp_{pdf_file.name}"
-        with open(temp_path, "wb") as f:
-            f.write(pdf_file.getbuffer())
-        pdf_attachment = client.files.upload(file=temp_path)
-        os.remove(temp_path)
+# Butang Logout di Sidebar
+if st.sidebar.button("Log Keluar"):
+    st.session_state.authenticated = False
+    st.rerun()
 
-    # Langkah 1: Research Agent
-    with st.spinner("🔍 1. Research Agent sedang mengkaji sudut pasaran..."):
-        research_contents = [
-            f"Kaji produk {product_name} berasaskan maklumat asas ini: {json.dumps(base_info)}.",
-            f"Objektif kempen daripada pengasas: {objective}."
+# =========================================================
+# 6. PAPARAN UTAMA (L1 -> L2 -> L3)
+# =========================================================
+st.title(f"⚡ Command Center: {selected_product}")
+st.write("Seni bina Multi-Agent: Research dijalankan sekali (L1), Copywriting dijana berulang kali (L2), dan disemak automatik oleh QA (L3).")
+
+# ---------------------------------------------------------
+# BAHAGIAN L1: TEAM RESEARCH (Jalankan Sekali / Cached)
+# ---------------------------------------------------------
+st.markdown("### 🔍 Tahap 1: Laporan Kajian Pasaran (Research Hub)")
+
+has_research = selected_product in st.session_state.research_store
+status_text = "✅ Sedia dalam memori (Boleh terus guna di L2)" if has_research else "⚠️ Belum dijalankan untuk produk ini"
+st.info(f"Status Kajian Produk **{selected_product}**: {status_text}")
+
+col_r1, col_r2 = st.columns([3, 1])
+with col_r1:
+    research_focus = st.text_input(
+        "Fokus Tambahan untuk Kajian Pasaran (Pilihan):", 
+        placeholder="Contoh: Kaji trend cabaran kewangan peniaga kecil masa kini"
+    )
+with col_r2:
+    btn_research = st.button("Jana / Kemas Kini Research (L1) 🧠", type="secondary")
+
+if btn_research:
+    with st.spinner("Research Agent sedang membedah pasaran & membaca dokumen..."):
+        pdf_attachment = None
+        if uploaded_pdf is not None:
+            temp_path = f"temp_{uploaded_pdf.name}"
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_pdf.getbuffer())
+            pdf_attachment = client.files.upload(file=temp_path)
+            os.remove(temp_path)
+
+        prompt_payload = [
+            f"Produk: {selected_product}",
+            f"Profil Asas Produk: {json.dumps(product_info)}",
+            f"Fokus Tambahan: {research_focus if research_focus else 'Kajian pasaran menyeluruh'}",
+            "Tugasan: Sediakan Customer Avatar terperinci, senaraikan 3 Masalah Utama (Pain Points), dan cadangkan 3 Sudut Pemasaran (Angles) yang paling berkesan di Malaysia."
         ]
         if pdf_attachment:
-            research_contents.append(pdf_attachment)
-        research_contents.append("Tugasan: Berikan Analisis Avatar, 3 Masalah Utama (Pain Points), dan 2 Sudut Pemasaran Paling Berkesan.")
+            prompt_payload.append(pdf_attachment)
 
-        research_res = client.models.generate_content(
+        res_research = client.models.generate_content(
             model="gemini-2.5-pro",
-            contents=research_contents,
+            contents=prompt_payload,
             config=types.GenerateContentConfig(
-                system_instruction="Awak ialah Market Research Agent yang tajam menganalisis pasaran Malaysia."
+                system_instruction="Awak ialah Market Research Specialist berpengalaman luas dalam pasaran tempatan Malaysia."
             )
         )
-        research_data = research_res.text
+        st.session_state.research_store[selected_product] = res_research.text
+        st.success("Kajian L1 berjaya disimpan dalam memori!")
+        st.rerun()
 
-    # Langkah 2: Content Agent
-    with st.spinner("✍️ 2. Content Agent sedang menulis salinan media sosial..."):
-        content_prompt = f"""
-        Produk: {product_name}
-        Hasil Kajian Penyelidik:
-        {research_data}
-        
-        Objektif: {objective}
-        
-        Tugasan: Tulis copywriting berikut dalam Bahasa Melayu:
-        1. Facebook Post (Format storytelling santai + emosi + Call to Action).
-        2. X / Twitter Thread (Ringkas, padat, 'hook' menarik).
-        3. Cadangan Visual (Prompt gambar AI atau idea poster).
-        """
-        content_res = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=content_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction="Awak ialah Content Creator & Copywriter pakar dalam pasaran media sosial Malaysia."
-            )
-        )
-        content_data = content_res.text
+# Paparkan hasil kajian jika wujud
+if has_research:
+    with st.expander("📖 Lihat Dokumen Research L1 Terperinci"):
+        st.markdown(st.session_state.research_store[selected_product])
 
-    # Langkah 3: QA & Compliance Agent
-    with st.spinner("⚖️ 3. QA Agent sedang menyemak kualiti dan pantang larang..."):
-        qa_prompt = f"""
-        Peraturan Khas Produk: {base_info['compliance']}
-        Salinan Iklan yang Dijana:
-        {content_data}
-        
-        Tugasan: 
-        1. Semak adakah terdapat overclaim, salah fakta, atau melanggar undang-undang etika.
-        2. Berikan Skor Kualiti Keseluruhan (1 hingga 10).
-        3. Berikan nasihat penambahbaikan ringkas jika ada.
-        """
-        qa_res = client.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=qa_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction="Awak ialah QA & Compliance Officer yang tegas dan teliti."
-            )
-        )
-        qa_data = qa_res.text
+st.markdown("---")
 
-    return research_data, content_data, qa_data
+# ---------------------------------------------------------
+# BAHAGIAN L2 & L3: TEAM CONTENT & DATA ANALYST / QA
+# ---------------------------------------------------------
+st.markdown("### ✍️ Tahap 2 & 3: Penjanaan Kandungan & Semakan QA Automatik")
 
-# --- 6. ANTARAMUKA UTAMA ---
-st.title(f"🚀 AI Marketing Team: {selected_product}")
-st.write("Arahkan pasukan ejen AI anda untuk menjana kempen lengkap dari kajian hingga semakan kualiti.")
+if not has_research:
+    st.warning("Sila jalankan Tahap 1 (Research Hub) terlebih dahulu sebelum menjana kandungan.")
+else:
+    c1, c2 = st.columns(2)
+    with c1:
+        campaign_theme = st.text_input("Tema Kempen Hari Ini:", placeholder="Contoh: Kempen Gaji Masuk / Cuti Sekolah / Tawaran Terhad")
+    with c2:
+        angle_choice = st.selectbox("Gaya / Pendekatan:", [
+            "Emosi & Storytelling (Kisah Kehidupan / Selesaikan Masalah)",
+            "Direct Response (Tawaran Segera, Mendesak & Diskaun)",
+            "Edukasi / Nilai Tambah (Tips Percuma & Kesedaran)"
+        ])
 
-campaign_goal = st.text_area(
-    "Apakah objektif atau fokus kempen kali ini?", 
-    placeholder="Contoh: Fokus promosi gaji masuk minggu ini untuk peniaga kecil sertai platform tanpa yuran pendaftaran."
-)
+    btn_content = st.button("Jana Draf Iklan Baru (L2) 🚀", type="primary")
 
-if st.button("Jana Kempen Lengkap ⚡", type="primary"):
-    if not campaign_goal.strip():
-        st.warning("Sila masukkan objektif kempen anda terlebih dahulu!")
-    else:
-        tab1, tab2, tab3 = st.tabs(["📝 Copywriting & Visual", "🔍 Laporan Research", "⚖️ Semakan QA"])
-        
-        research_out, content_out, qa_out = run_pipeline(
-            selected_product, 
-            product_info, 
-            uploaded_pdf, 
-            campaign_goal
-        )
-        
-        with tab1:
-            st.subheader("Draf Kandungan Media Sosial")
-            st.markdown(content_out)
-            
-        with tab2:
-            st.subheader("Hasil Kajian Pasaran & Avatar")
-            st.markdown(research_out)
-            
-        with tab3:
-            st.subheader("Laporan Semakan Kualiti & Pematuhan")
-            st.markdown(qa_out)
+    if btn_content:
+        if not campaign_theme.strip():
+            st.warning("Sila masukkan Tema Kempen sebelum menjana draf!")
+        else:
+            cached_research = st.session_state.research_store[selected_product]
+
+            # 1. Panggil Content & Visual Agent (L2)
+            with st.spinner("Content Agent sedang mengarang copywriting & idea visual..."):
+                content_prompt = f"""
+                Produk: {selected_product}
+                Tema Kempen: {campaign_theme}
+                Pendekatan Pemasaran: {angle_choice}
+                Sumber Kajian Induk (L1):
+                {cached_research}
+
+                Tugasan:
+                1. Tulis 1 salinan Facebook Post yang santai, memikat jiwa, dan ada Call-To-Action (CTA) jelas.
+                2. Tulis 1 bebenang X / Twitter yang pendek dan padat (Hook + Isi + CTA).
+                3. Berikan 1 cadangan Visual (Prompt imej AI atau konsep poster Canva).
+                """
+                res_content = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=content_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction="Awak ialah Senior Copywriter dan Creative Director di Malaysia."
+                    )
+                )
+                draft_text = res_content.text
+
+            # 2. Panggil Data Analyst & QA Agent (L3) secara automatik
+            with st.spinner("QA Agent sedang mengaudit kualiti, fakta & integriti iklan..."):
+                qa_prompt = f"""
+                Produk: {selected_product}
+                Peraturan Integriti & Compliance: {product_info['compliance']}
+                Draf Iklan yang Dihasilkan:
+                {draft_text}
+
+                Tugasan:
+                1. Berikan Skor Kualiti (1 hingga 10).
+                2. Semak jika ada overclaim, kenyataan palsu, atau risiko melanggar etika.
+                3. Berikan komen penambahbaikan ringkas.
+                """
+                res_qa = client.models.generate_content(
+                    model="gemini-2.5-pro",
+                    contents=qa_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction="Awak ialah Data Analyst & QA Compliance Officer yang sangat teliti dan beretika."
+                    )
+                )
+                qa_report_text = res_qa.text
+
+            # Simpan dalam senarai arkib sesi
+            st.session_state.content_history.insert(0, {
+                "product": selected_product,
+                "theme": campaign_theme,
+                "angle": angle_choice,
+                "content": draft_text,
+                "qa": qa_report_text
+            })
+            st.success("Kandungan berjaya dijana dan selesai diaudit oleh QA!")
+
+# Paparkan arkib draf kandungan terkini
+if st.session_state.content_history:
+    st.markdown("---")
+    st.subheader("📂 Arkib Draf Iklan & Laporan Audit Terkini")
+
+    for i, item in enumerate(st.session_state.content_history):
+        with st.container():
+            st.markdown(f"#### 🏷️ #{len(st.session_state.content_history) - i} | [{item['product']}] {item['theme']} — *{item['angle']}*")
+            tab_copy, tab_audit = st.tabs(["📝 Salinan Iklan & Visual (L2)", "⚖️ Laporan QA & Integriti (L3)"])
+            with tab_copy:
+                st.markdown(item["content"])
+            with tab_audit:
+                st.markdown(item["qa"])
+            st.markdown("---")
