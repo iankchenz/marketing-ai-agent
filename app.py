@@ -223,14 +223,16 @@ col_r1, col_r2 = st.columns([3, 1])
 with col_r1:
     research_focus = st.text_input(
         "Fokus Tambahan untuk Kajian Pasaran (Pilihan):", 
-        placeholder="Contoh: Kaji cabaran peniaga kecil hadapi komisen tinggi / kos data bulanan mahal"
+        placeholder="Contoh: Kaji trend penjimatan bil telefon atau cara jana pendapatan pasif"
     )
 with col_r2:
     btn_research = st.button("Jana / Kemas Kini Research (L1) 🧠", type="secondary")
 
 if btn_research:
     try:
-        with st.spinner("Research Agent sedang menganalisis psikologi pasaran Malaysia..."):
+        with st.spinner("Research Agent sedang membedah pasaran (First-Principles Thinking)..."):
+            
+            # 1. Payload Maklumat Produk & Fokus Tambahan
             prompt_payload = f"""
             Produk: {selected_product}
             Pangkalan Pengetahuan:
@@ -238,28 +240,35 @@ if btn_research:
             
             Fokus Tambahan: {research_focus if research_focus else 'Kajian pasaran menyeluruh'}
             
-            Tugasan Penyelidikan Mendalam:
-            1. PSIKOGRAFIK AVATAR: Analisis ketakutan (fears), keraguan (objections), dan matlamat hidup mereka di Malaysia.
-            2. 3 PAIN POINTS KRITIKAL: Terangkan masalah sebenar mereka dengan situasi realiti harian.
-            3. 3 SUDUT PENDEKATAN (ANGLES): Cadangkan 3 sudut pemasaran unik yang menyentuh emosi berserta 1 cadangan 'Hook' pembuka bagi setiap sudut.
+            Tugasan Penyelidikan:
+            1. Analisis Demografik & Psikografik sasaran di Malaysia.
+            2. 3 Pain Points kritikal prospek (emosi, kewangan, masa).
+            3. 3 Sudut Pemasaran (Angles) berserta ayat Hook pembuka.
             """
 
-            # STRATEGI 3: Deep Thinking System Instruction
-            research_instruction = """
-            Awak ialah Senior Consumer Psychologist dan Market Strategist di Malaysia.
-            Gunakan prinsip First-Principles Thinking:
-            - Dilarang memberikan ayat klise, umum, atau definisi kamus.
-            - Kaitkan realiti sosioekonomi tempatan (kos sara hidup, inflasi, persaingan perniagaan, tanggungan keluarga).
-            - Setiap poin mesti padat, tajam, dan boleh terus ditukar menjadi strategi jualan.
+            # 2. ARAHAN SISTEM STRATEGI 3 (DEEP THINKING PROMPT)
+            system_prompt_research = """
+            Awak ialah Lead Market Strategist & Consumer Psychologist. 
+            Gunakan kerangka pemikiran mendalam (First-Principles Thinking).
+
+            Peraturan Analisis:
+            1. JANGAN tulis ayat umum, klise, atau berbunga-bunga.
+            2. Berikan analisis demografik dan psikografik yang spesifik untuk pasaran Malaysia (faktor gaji, kos sara hidup, gaya hidup).
+            3. Berikan 'Pain Points' sebenar yang menyentuh emosi pembeli (ketakutan, kerugian masa, pembaziran wang).
+            4. Setiap cadangan sudut pemasaran (Angle) MESTI disertakan dengan 'Hook' pembuka ayat yang kuat.
             """
 
+            # 3. Panggil Model dengan Arahan Sistem Tersebut
             research_result = call_gemini(
                 contents=prompt_payload,
-                system_instruction=research_instruction
+                system_instruction=system_prompt_research
             )
+            
+            # Simpan ke session state supaya L2 boleh baca terus
             st.session_state.research_store[selected_product] = research_result
             st.success("Kajian L1 berjaya disimpan dalam memori!")
             st.rerun()
+            
     except Exception as e:
         st.error(f"❌ Ralat Tahap 1: {str(e)}")
 
