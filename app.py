@@ -138,7 +138,7 @@ if uploaded_pdf is not None:
             Sediakan ringkasan dalam bentuk poin fakta yang padat dan terperinci.
             """
             extract_res = client.models.generate_content(
-                model="gemini-2.5-pro",
+                model="gemini-1.5-pro",
                 contents=[gemini_file, extract_prompt]
             )
             extracted_text = extract_res.text
@@ -209,7 +209,7 @@ if btn_research:
         """
 
         res_research = client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-1.5-pro",
             contents=prompt_payload,
             config=types.GenerateContentConfig(
                 system_instruction="Awak ialah Market Research Specialist berpengalaman luas dalam pasaran tempatan Malaysia."
@@ -266,7 +266,7 @@ else:
                 3. Berikan 1 cadangan Visual (Prompt imej AI atau konsep poster Canva).
                 """
                 res_content = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=content_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction="Awak ialah Senior Copywriter dan Creative Director di Malaysia."
@@ -288,7 +288,7 @@ else:
                 3. Berikan komen penambahbaikan ringkas.
                 """
                 res_qa = client.models.generate_content(
-                    model="gemini-2.5-pro",
+                    model="gemini-1.5-pro",
                     contents=qa_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction="Awak ialah Data Analyst & QA Compliance Officer yang sangat teliti dan beretika."
