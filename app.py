@@ -3,7 +3,6 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 import json
-import os
 
 # =========================================================
 # 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN)
@@ -45,7 +44,36 @@ client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # =========================================================
-# 3. PENGKALAN DATA PRODUK ASAS (FALLBACK)
+# 3. FUNGSI PANGGILAN MODEL DENGAN AUTO-FALLBACK
+# =========================================================
+# Senarai model yang disahkan oleh Google API & fail PDF
+PRO_MODELS = ["gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
+FLASH_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.1-pro-preview"]
+
+def call_gemini(contents, system_instruction=None, is_pro=True):
+    model_list = PRO_MODELS if is_pro else FLASH_MODELS
+    last_error = None
+    
+    config = types.GenerateContentConfig()
+    if system_instruction:
+        config.system_instruction = system_instruction
+
+    for m in model_list:
+        try:
+            response = client.models.generate_content(
+                model=m,
+                contents=contents,
+                config=config
+            )
+            return response.text
+        except Exception as e:
+            last_error = e
+            continue
+            
+    raise RuntimeError(f"Gagal memanggil model Google Gemini: {last_error}")
+
+# =========================================================
+# 4. PENGKALAN DATA PRODUK ASAS (DEFAULT KNOWLEDGE)
 # =========================================================
 DEFAULT_KNOWLEDGE = {
     "Tone Wow": {
@@ -74,7 +102,6 @@ DEFAULT_KNOWLEDGE = {
     }
 }
 
-# Fungsi tarik maklumat dokumen daripada Supabase
 def get_saved_knowledge(product_name):
     try:
         res = supabase.table("product_knowledge").select("*").eq("product_name", product_name).execute()
@@ -85,7 +112,7 @@ def get_saved_knowledge(product_name):
     return None
 
 # =========================================================
-# 4. INISIALISASI SESI (SESSION STATE)
+# 5. INISIALISASI SESI (SESSION STATE)
 # =========================================================
 if "research_store" not in st.session_state:
     st.session_state.research_store = {}
@@ -93,7 +120,7 @@ if "content_history" not in st.session_state:
     st.session_state.content_history = []
 
 # =========================================================
-# 5. SIDEBAR: PENGURUSAN PRODUK & UPLOAD KE SUPABASE
+# 6. SIDEBAR: PENGURUSAN PRODUK & MUAT NAIK PDF
 # =========================================================
 st.sidebar.title("🎛️ Pusat Kawalan Produk")
 selected_product = st.sidebar.selectbox("Pilih Produk:", list(DEFAULT_KNOWLEDGE.keys()))
@@ -101,7 +128,6 @@ selected_product = st.sidebar.selectbox("Pilih Produk:", list(DEFAULT_KNOWLEDGE.
 st.sidebar.markdown("---")
 st.sidebar.subheader("📄 Kemas Kini Pengetahuan Produk")
 
-# Semak sama ada produk ini sudah ada maklumat tersimpan dalam Supabase
 saved_db_doc = get_saved_knowledge(selected_product)
 
 if saved_db_doc:
@@ -110,25 +136,22 @@ if saved_db_doc:
         st.caption(f"Dikemaskini pada: {saved_db_doc.get('updated_at', '-')}")
         st.write(saved_db_doc['extracted_content'])
 else:
-    st.sidebar.info("ℹ️ Belum ada dokumen PDF disimpan untuk produk ini. Sistem sedang menggunakan maklumat asas.")
+    st.sidebar.info("ℹ️ Belum ada dokumen PDF disimpan untuk produk ini. Menggunakan maklumat asas.")
 
-# Kotak muat naik dokumen PDF
 uploaded_pdf = st.sidebar.file_uploader(f"Pilih fail PDF baharu ({selected_product})", type=["pdf"])
 
-# BUTANG PENGESAHAN: Hanya muncul apabila fail telah dipilih
 if uploaded_pdf is not None:
     st.sidebar.caption(f"Fail dipilih: `{uploaded_pdf.name}`")
     if st.sidebar.button("🚀 Hantar & Simpan PDF ke Supabase", type="primary"):
         with st.sidebar.status("Sedang memproses & mengekstrak data...", expanded=True) as status_box:
-            st.write("1. Menyimpan fail sementara...")
-            temp_path = f"temp_{uploaded_pdf.name}"
-            with open(temp_path, "wb") as f:
-                f.write(uploaded_pdf.getbuffer())
+            st.write("1. Membaca data fail PDF...")
+            pdf_bytes = uploaded_pdf.getvalue()
+            pdf_part = types.Part.from_bytes(
+                data=pdf_bytes,
+                mime_type="application/pdf"
+            )
             
-            st.write("2. Menghantar ke Gemini untuk pembacaan...")
-            gemini_file = client.files.upload(file=temp_path)
-            
-            st.write("3. Menjana ringkasan fakta penting...")
+            st.write("2. Gemini sedang menganalisis dokumen...")
             extract_prompt = f"""
             Ekstrak semua maklumat penting daripada PDF ini untuk dijadikan pangkalan pengetahuan produk {selected_product}:
             1. Pakej, Pelan & Harga Terkini.
@@ -137,21 +160,20 @@ if uploaded_pdf is not None:
             4. Pantang Larang & Terma Penting.
             Sediakan ringkasan dalam bentuk poin fakta yang padat dan terperinci.
             """
-            extract_res = client.models.generate_content(
-                model="gemini-1.5-pro",
-                contents=[gemini_file, extract_prompt]
-            )
-            extracted_text = extract_res.text
             
-            st.write("4. Menyimpan ke Supabase Database...")
+            extracted_text = call_gemini(
+                contents=[pdf_part, extract_prompt],
+                system_instruction="Awak ialah pakar pengekstrakan data dokumen dan maklumat produk.",
+                is_pro=True
+            )
+            
+            st.write("3. Menyimpan terus ke Pangkalan Data Supabase...")
             supabase.table("product_knowledge").upsert({
                 "product_name": selected_product,
                 "pdf_name": uploaded_pdf.name,
                 "extracted_content": extracted_text
             }).execute()
             
-            # Bersihkan fail sementara
-            os.remove(temp_path)
             status_box.update(label="✅ Selesai disimpan ke Supabase!", state="complete", expanded=False)
             
         st.sidebar.success(f"Berjaya! Dokumen `{uploaded_pdf.name}` kini kekal dalam pangkalan data.")
@@ -169,17 +191,16 @@ if st.sidebar.button("Log Keluar"):
     st.rerun()
 
 # =========================================================
-# 6. PAPARAN UTAMA (L1 -> L2 -> L3)
+# 7. PAPARAN UTAMA (L1 -> L2 -> L3)
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
-# Bina profil rujukan gabungan (Default + Supabase jika ada)
 knowledge_context = f"Maklumat Asas: {json.dumps(base_info)}\n"
 if saved_db_doc:
-    knowledge_context += f"\nMaklumat Tambahan daripada Dokumen Rasmi ({saved_db_doc['pdf_name']}):\n{saved_db_doc['extracted_content']}"
+    knowledge_context += f"\nMaklumat Tambahan Dokumen Rasmi ({saved_db_doc['pdf_name']}):\n{saved_db_doc['extracted_content']}"
 
 # ---------------------------------------------------------
-# BAHAGIAN L1: TEAM RESEARCH (Jalankan Sekali / Cached)
+# TAHAP 1: TEAM RESEARCH (Jalankan Sekali / Cached)
 # ---------------------------------------------------------
 st.markdown("### 🔍 Tahap 1: Laporan Kajian Pasaran (Research Hub)")
 
@@ -208,14 +229,12 @@ if btn_research:
         Tugasan: Sediakan Customer Avatar terperinci, senaraikan 3 Masalah Utama (Pain Points), dan cadangkan 3 Sudut Pemasaran (Angles) yang paling berkesan di Malaysia.
         """
 
-        res_research = client.models.generate_content(
-            model="gemini-1.5-pro",
+        research_result = call_gemini(
             contents=prompt_payload,
-            config=types.GenerateContentConfig(
-                system_instruction="Awak ialah Market Research Specialist berpengalaman luas dalam pasaran tempatan Malaysia."
-            )
+            system_instruction="Awak ialah Market Research Specialist berpengalaman luas dalam pasaran tempatan Malaysia.",
+            is_pro=True
         )
-        st.session_state.research_store[selected_product] = res_research.text
+        st.session_state.research_store[selected_product] = research_result
         st.success("Kajian L1 berjaya disimpan dalam memori!")
         st.rerun()
 
@@ -226,7 +245,7 @@ if has_research:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# BAHAGIAN L2 & L3: TEAM CONTENT & DATA ANALYST / QA
+# TAHAP 2 & 3: PENJANAAN KANDUNGAN & SEMAKAN QA
 # ---------------------------------------------------------
 st.markdown("### ✍️ Tahap 2 & 3: Penjanaan Kandungan & Semakan QA Automatik")
 
@@ -251,8 +270,8 @@ else:
         else:
             cached_research = st.session_state.research_store[selected_product]
 
-            # 1. Panggil Content & Visual Agent (L2)
-            with st.spinner("Content Agent sedang mengarang copywriting & idea visual..."):
+            # 1. TAHAP 2: Content & Visual Agent (Flash)
+            with st.spinner("Content Agent sedang mengarang copywriting & visual..."):
                 content_prompt = f"""
                 Produk: {selected_product}
                 Tema Kempen: {campaign_theme}
@@ -265,16 +284,13 @@ else:
                 2. Tulis 1 bebenang X / Twitter yang pendek dan padat (Hook + Isi + CTA).
                 3. Berikan 1 cadangan Visual (Prompt imej AI atau konsep poster Canva).
                 """
-                res_content = client.models.generate_content(
-                    model="gemini-2.0-flash",
+                draft_text = call_gemini(
                     contents=content_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction="Awak ialah Senior Copywriter dan Creative Director di Malaysia."
-                    )
+                    system_instruction="Awak ialah Senior Copywriter dan Creative Director di Malaysia.",
+                    is_pro=False
                 )
-                draft_text = res_content.text
 
-            # 2. Panggil Data Analyst & QA Agent (L3)
+            # 2. TAHAP 3: QA & Data Analyst Agent (Pro)
             with st.spinner("QA Agent sedang mengaudit kualiti, fakta & integriti iklan..."):
                 qa_prompt = f"""
                 Produk: {selected_product}
@@ -287,14 +303,11 @@ else:
                 2. Semak jika ada overclaim, kenyataan palsu, atau risiko melanggar etika.
                 3. Berikan komen penambahbaikan ringkas.
                 """
-                res_qa = client.models.generate_content(
-                    model="gemini-1.5-pro",
+                qa_report_text = call_gemini(
                     contents=qa_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction="Awak ialah Data Analyst & QA Compliance Officer yang sangat teliti dan beretika."
-                    )
+                    system_instruction="Awak ialah Data Analyst & QA Compliance Officer yang sangat teliti dan beretika.",
+                    is_pro=True
                 )
-                qa_report_text = res_qa.text
 
             # Simpan rekod kempen
             st.session_state.content_history.insert(0, {
