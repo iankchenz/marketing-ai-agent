@@ -46,49 +46,48 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =========================================================
-# 3. PENETAPAN MODEL RASMI DITETAPKAN GOOGLE API
-# =========================================================
-MODEL_PRO = "gemini-3.1-pro-preview"
-MODEL_FLASH = "gemini-3.8-flash"
+# MODEL AKTIF: Kuota percuma 500 sehari (RPD)
+MODEL_NAME = "gemini-3.1-flash-lite"
 
-def call_gemini(contents, system_instruction=None, is_pro=True):
-    target_model = MODEL_PRO if is_pro else MODEL_FLASH
+# =========================================================
+# 3. ENJIN PANGGILAN AI (DENGAN DEEP THINKING SYSTEM PROMPTS)
+# =========================================================
+def call_gemini(contents, system_instruction=None):
     config = types.GenerateContentConfig()
     if system_instruction:
         config.system_instruction = system_instruction
 
     response = client.models.generate_content(
-        model=target_model,
+        model=MODEL_NAME,
         contents=contents,
         config=config
     )
     return response.text
 
 # =========================================================
-# 4. PENGKALAN DATA PRODUK ASAS (DEFAULT KNOWLEDGE)
+# 4. PENGKALAN DATA PRODUK ASAS (KNOWLEDGE BASE INDUK)
 # =========================================================
 DEFAULT_KNOWLEDGE = {
     "Tone Wow": {
-        "kategori": "Telco & Pendapatan Pasif",
-        "usp": "Simkad prabayar pelan data jimat yang memberi insentif komisen rujukan setiap kali pengguna topup.",
-        "avatar": "Pengguna telefon pintar yang ingin kurangkan beban bil & individu mencari pendapatan sampingan.",
+        "kategori": "Telco & Komisen Rujukan",
+        "usp": "Simkad prabayar pelan data jimat yang memberi insentif komisen tunai berulang setiap kali pengguna topup.",
+        "avatar": "Pengguna telefon yang ingin kurangkan beban kos sara hidup & individu mencari pendapatan sampingan sah.",
         "compliance": "Dilarang janjikan pendapatan goyang kaki atau guna istilah skim cepat kaya / skim piramid."
     },
     "Eastel": {
         "kategori": "Telco Mampu Milik",
-        "usp": "Penyedia pelan internet pantas dengan kuota besar pada kadar mampu milik mesra poket.",
-        "avatar": "Pelajar, penghantar makanan / gig workers, dan keluarga yang mengutamakan penjimatan.",
-        "compliance": "Fokus pada kestabilan liputan dan penjimatan kos bulanan."
+        "usp": "Penyedia pelan internet pantas dengan kuota besar pada kadar mampu milik mesra poket marhaen.",
+        "avatar": "Pelajar universiti, penghantar makanan / gig workers, dan keluarga yang mengutamakan penjimatan.",
+        "compliance": "Fokus pada kestabilan liputan dan penjimatan kos bulanan sebenar."
     },
     "Produk AI": {
         "kategori": "Automasi & Perisian AI",
-        "usp": "Sistem ejen pintar untuk automasi copywriting, analisis data, dan sokongan pemasaran bisnes.",
-        "avatar": "Pemilik bisnes PKS, usahawan solo, dan pencipta kandungan digital.",
-        "compliance": "Jangan buat kenyataan palsu (overclaim) bahawa AI menggantikan 100% manusia tanpa semakan fakta."
+        "usp": "Sistem ejen pintar untuk automasi copywriting, analisis data, dan sokongan pemasaran bisnes PKS.",
+        "avatar": "Pemilik bisnes PKS, usahawan solo, dan pencipta kandungan digital yang kekurangan tenaga kerja.",
+        "compliance": "Jangan overclaim bahawa AI menggantikan 100% manusia tanpa semakan fakta."
     },
     "BeliBeliOnline": {
-        "kategori": "Marketplace & E-Commerce Tempatan",
+        "kategori": "Marketplace E-Commerce Tempatan",
         "usp": "Platform e-dagang tempatan mesra peniaga kecil dengan kadar komisen adil dan sokongan komuniti usahawan.",
         "avatar": "Peniaga kecil IKS tempatan dan pembeli barangan buatan Malaysia.",
         "compliance": "Elakkan membuat perbandingan agresif atau memburukkan platform e-commerce lain."
@@ -105,7 +104,7 @@ def get_saved_knowledge(product_name):
     return None
 
 # =========================================================
-# 5. INISIALISASI SESI (SESSION STATE)
+# 5. INISIALISASI SESI
 # =========================================================
 if "research_store" not in st.session_state:
     st.session_state.research_store = {}
@@ -113,13 +112,13 @@ if "content_history" not in st.session_state:
     st.session_state.content_history = []
 
 # =========================================================
-# 6. SIDEBAR: PUSAT KAWALAN & UPLOAD PDF
+# 6. SIDEBAR: PUSAT KAWALAN & EKSTRAK PDF KE SUPABASE
 # =========================================================
 st.sidebar.title("🎛️ Pusat Kawalan Produk")
 selected_product = st.sidebar.selectbox("Pilih Produk:", list(DEFAULT_KNOWLEDGE.keys()))
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Kemas Kini Pengetahuan Produk")
+st.sidebar.subheader("📄 Pangkalan Pengetahuan Produk")
 
 saved_db_doc = get_saved_knowledge(selected_product)
 
@@ -129,7 +128,7 @@ if saved_db_doc:
         st.caption(f"Dikemaskini pada: {saved_db_doc.get('updated_at', '-')}")
         st.write(saved_db_doc['extracted_content'])
 else:
-    st.sidebar.info("ℹ️ Belum ada dokumen PDF disimpan untuk produk ini. Menggunakan maklumat asas.")
+    st.sidebar.info("ℹ️ Belum ada fail PDF disimpan untuk produk ini. Menggunakan info asas.")
 
 uploaded_pdf = st.sidebar.file_uploader(f"Pilih fail PDF baharu ({selected_product})", type=["pdf"])
 
@@ -144,31 +143,31 @@ if uploaded_pdf is not None:
                     tmp.write(uploaded_pdf.getvalue())
                     temp_file_path = tmp.name
 
-                st.write(f"2. Memuat naik fail ke Google Files API...")
+                st.write("2. Menghantar fail ke Google Files API...")
                 gemini_file = client.files.upload(file=temp_file_path)
 
-                # Semak status fail jika masih diproses
                 while getattr(gemini_file, 'state', None) and gemini_file.state.name == "PROCESSING":
                     time.sleep(1)
                     gemini_file = client.files.get(name=gemini_file.name)
 
-                st.write(f"3. AI ({MODEL_PRO}) sedang membaca & mengekstrak fakta penting...")
+                st.write("3. Mengekstrak fakta mendalam (First-Principles Analysis)...")
                 extract_prompt = f"""
-                Ekstrak semua maklumat penting daripada PDF ini untuk dijadikan pangkalan pengetahuan produk {selected_product}:
-                1. Pakej, Pelan & Harga Terkini.
-                2. Kelebihan Unik (USP) & Tawaran Tambahan.
-                3. Avatar / Sasaran Pelanggan Tepat.
-                4. Pantang Larang & Terma Penting.
-                Sediakan ringkasan dalam bentuk poin fakta yang padat dan terperinci.
+                Bedah dokumen PDF ini untuk produk {selected_product}.
+                Gunakan analisis First-Principles: Asingkan fakta sebenar daripada ayat promosi.
+                
+                Keluarkan struktur padat berikut:
+                1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
+                2. CORE VALUE / USP: 3 nilai teras yang membezakan produk ini daripada pesaing.
+                3. DEMOGRAFIK & AVATAR: Siapa yang paling rugi jika tidak melanggan/menggunakan produk ini?
+                4. TERMA KRITIKAL & PANTANG LARANG: Syarat kelayakan dan perkara yang dilarang salah faham.
                 """
                 
                 extracted_text = call_gemini(
                     contents=[gemini_file, extract_prompt],
-                    system_instruction="Awak ialah pakar analisis dokumen perniagaan dan pengekstrakan maklumat produk.",
-                    is_pro=True
+                    system_instruction="Awak ialah Data Research Auditor yang mengekstrak maklumat perniagaan secara objektif dan tepat."
                 )
 
-                st.write("4. Menyimpan data ke Pangkalan Data Supabase...")
+                st.write("4. Menyimpan data kekal ke Supabase...")
                 supabase.table("product_knowledge").upsert({
                     "product_name": selected_product,
                     "pdf_name": uploaded_pdf.name,
@@ -188,9 +187,9 @@ if uploaded_pdf is not None:
                 os.remove(temp_file_path)
 
 st.sidebar.markdown("---")
-with st.sidebar.expander("🤖 Maklumat Enjin AI"):
-    st.write(f"**Model Pro:** `{MODEL_PRO}`")
-    st.write(f"**Model Flash:** `{MODEL_FLASH}`")
+with st.sidebar.expander("🤖 Status Model AI"):
+    st.write(f"**Model Aktif:** `{MODEL_NAME}`")
+    st.caption("Pelan Kuota: 500 permintaan sehari (Percuma).")
 
 base_info = DEFAULT_KNOWLEDGE[selected_product]
 with st.sidebar.expander("📌 Info Asas Sistem (Default)"):
@@ -203,7 +202,7 @@ if st.sidebar.button("Log Keluar"):
     st.rerun()
 
 # =========================================================
-# 7. PAPARAN UTAMA (L1 -> L2 -> L3)
+# 7. PAPARAN UTAMA (L1 -> L2 -> L3 DENGAN STRATEGI 3)
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
@@ -212,7 +211,7 @@ if saved_db_doc:
     knowledge_context += f"\nMaklumat Tambahan Dokumen Rasmi ({saved_db_doc['pdf_name']}):\n{saved_db_doc['extracted_content']}"
 
 # ---------------------------------------------------------
-# TAHAP 1: TEAM RESEARCH (Cached / Sekali Sahaja)
+# TAHAP 1: TEAM RESEARCH (DEEP THINKING RESEARCH AGENT)
 # ---------------------------------------------------------
 st.markdown("### 🔍 Tahap 1: Laporan Kajian Pasaran (Research Hub)")
 
@@ -224,14 +223,14 @@ col_r1, col_r2 = st.columns([3, 1])
 with col_r1:
     research_focus = st.text_input(
         "Fokus Tambahan untuk Kajian Pasaran (Pilihan):", 
-        placeholder="Contoh: Kaji trend penjimatan bil telefon atau cara jana pendapatan pasif"
+        placeholder="Contoh: Kaji cabaran peniaga kecil hadapi komisen tinggi / kos data bulanan mahal"
     )
 with col_r2:
     btn_research = st.button("Jana / Kemas Kini Research (L1) 🧠", type="secondary")
 
 if btn_research:
     try:
-        with st.spinner(f"Research Agent ({MODEL_PRO}) sedang mengkaji pasaran..."):
+        with st.spinner("Research Agent sedang menganalisis psikologi pasaran Malaysia..."):
             prompt_payload = f"""
             Produk: {selected_product}
             Pangkalan Pengetahuan:
@@ -239,13 +238,24 @@ if btn_research:
             
             Fokus Tambahan: {research_focus if research_focus else 'Kajian pasaran menyeluruh'}
             
-            Tugasan: Sediakan Customer Avatar terperinci, senaraikan 3 Masalah Utama (Pain Points), dan cadangkan 3 Sudut Pemasaran (Angles) yang paling berkesan di Malaysia.
+            Tugasan Penyelidikan Mendalam:
+            1. PSIKOGRAFIK AVATAR: Analisis ketakutan (fears), keraguan (objections), dan matlamat hidup mereka di Malaysia.
+            2. 3 PAIN POINTS KRITIKAL: Terangkan masalah sebenar mereka dengan situasi realiti harian.
+            3. 3 SUDUT PENDEKATAN (ANGLES): Cadangkan 3 sudut pemasaran unik yang menyentuh emosi berserta 1 cadangan 'Hook' pembuka bagi setiap sudut.
+            """
+
+            # STRATEGI 3: Deep Thinking System Instruction
+            research_instruction = """
+            Awak ialah Senior Consumer Psychologist dan Market Strategist di Malaysia.
+            Gunakan prinsip First-Principles Thinking:
+            - Dilarang memberikan ayat klise, umum, atau definisi kamus.
+            - Kaitkan realiti sosioekonomi tempatan (kos sara hidup, inflasi, persaingan perniagaan, tanggungan keluarga).
+            - Setiap poin mesti padat, tajam, dan boleh terus ditukar menjadi strategi jualan.
             """
 
             research_result = call_gemini(
                 contents=prompt_payload,
-                system_instruction="Awak ialah Market Research Specialist berpengalaman luas dalam pasaran tempatan Malaysia.",
-                is_pro=True
+                system_instruction=research_instruction
             )
             st.session_state.research_store[selected_product] = research_result
             st.success("Kajian L1 berjaya disimpan dalam memori!")
@@ -260,7 +270,7 @@ if has_research:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# TAHAP 2 & 3: PENJANAAN KANDUNGAN & SEMAKAN QA
+# TAHAP 2 & 3: PENJANAAN KANDUNGAN & AUDIT QA AUTOMATIK
 # ---------------------------------------------------------
 st.markdown("### ✍️ Tahap 2 & 3: Penjanaan Kandungan & Semakan QA Automatik")
 
@@ -286,8 +296,8 @@ else:
             try:
                 cached_research = st.session_state.research_store[selected_product]
 
-                # 1. TAHAP 2: Content Agent
-                with st.spinner(f"Content Agent ({MODEL_FLASH}) sedang mengarang copywriting & visual..."):
+                # 1. TAHAP 2: Content Agent (Dengan Prompt Gaya Copywriter Handal)
+                with st.spinner("Content Agent sedang merangka salinan iklan memukau..."):
                     content_prompt = f"""
                     Produk: {selected_product}
                     Tema Kempen: {campaign_theme}
@@ -296,36 +306,54 @@ else:
                     {cached_research}
 
                     Tugasan:
-                    1. Tulis 1 salinan Facebook Post yang santai, memikat jiwa, dan ada Call-To-Action (CTA) jelas.
-                    2. Tulis 1 bebenang X / Twitter yang pendek dan padat (Hook + Isi + CTA).
-                    3. Berikan 1 cadangan Visual (Prompt imej AI atau konsep poster Canva).
+                    1. Salinan Facebook Post:
+                       - Hook pembuka yang mencengkam (Stop-scrolling hook).
+                       - Penceritaan santai yang menyentuh emosi pembaca tempatan.
+                       - Tawaran yang jelas dan Call-To-Action (CTA) yang mendesak.
+                    2. Bebenang X / Twitter:
+                       - Hook tweet pertama yang memukau.
+                       - 3 tweet isi padat dan bersambung.
+                       - Tweet penutup bersama CTA.
+                    3. Konsep Visual:
+                       - Deskripsi visual poster atau prompt jana gambar AI (gaya hiper-realistik/moden).
                     """
+                    
+                    content_instruction = """
+                    Awak ialah Senior Direct-Response Copywriter berprestasi tinggi di Malaysia.
+                    Gunakan Bahasa Melayu yang hidup, santai, beremosi, dan tidak kedengaran seperti teks terjemahan AI yang kaku.
+                    Pastikan salinan iklan fokus kepada faedah pelanggan, bukan ciri teknikal semata-mata.
+                    """
+                    
                     draft_text = call_gemini(
                         contents=content_prompt,
-                        system_instruction="Awak ialah Senior Copywriter dan Creative Director di Malaysia.",
-                        is_pro=False
+                        system_instruction=content_instruction
                     )
 
-                # 2. TAHAP 3: QA & Data Analyst Agent
-                with st.spinner(f"QA Agent ({MODEL_PRO}) sedang mengaudit integriti draf..."):
+                # 2. TAHAP 3: QA & Data Analyst Agent (Audit Ketat)
+                with st.spinner("QA Agent sedang mengaudit etika & integriti iklan..."):
                     qa_prompt = f"""
                     Produk: {selected_product}
                     Peraturan Integriti & Compliance: {base_info['compliance']}
                     Draf Iklan yang Dihasilkan:
                     {draft_text}
 
-                    Tugasan:
-                    1. Berikan Skor Kualiti (1 hingga 10).
-                    2. Semak jika ada overclaim, kenyataan palsu, atau risiko melanggar etika.
-                    3. Berikan komen penambahbaikan ringkas.
+                    Tugasan Audit Integriti:
+                    1. Skor Kualiti & Keyakinan: Berikan skor 1 hingga 10.
+                    2. Semakan Risiko & Etika: Semak jika ada overclaim, janji palsu, atau perkataan berisiko undang-undang.
+                    3. Pembetulan Pantas: Nyatakan baris ayat yang perlu dibaiki jika ada kelemahan.
                     """
+                    
+                    qa_instruction = """
+                    Awak ialah Chief Compliance Officer dan Advertising Ethics Auditor.
+                    Bertindak tegas, jangan beri markah tinggi jika iklan mengelirukan atau melanggar pantang larang jenama.
+                    """
+                    
                     qa_report_text = call_gemini(
                         contents=qa_prompt,
-                        system_instruction="Awak ialah Data Analyst & QA Compliance Officer yang sangat teliti dan beretika.",
-                        is_pro=True
+                        system_instruction=qa_instruction
                     )
 
-                # Simpan rekod kempen
+                # Simpan ke sejarah kempen
                 st.session_state.content_history.insert(0, {
                     "product": selected_product,
                     "theme": campaign_theme,
