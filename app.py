@@ -4,6 +4,7 @@ from google.genai import types
 from supabase import create_client, Client
 import json
 import time
+import requests
 
 # =========================================================
 # 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN)
@@ -44,10 +45,11 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Model Kuota Percuma 500 Panggilan Sehari
 MODEL_NAME = "gemini-3.1-flash-lite"
 
 # =========================================================
-# 3. ENJIN PANGGILAN AI
+# 3. FUNGSI UTILITI AI & TELEGRAM
 # =========================================================
 def call_gemini(contents, system_instruction=None):
     config = types.GenerateContentConfig()
@@ -60,6 +62,25 @@ def call_gemini(contents, system_instruction=None):
         config=config
     )
     return response.text
+
+def send_telegram_message(bot_token, chat_id, message_text):
+    """Hantar mesej ke Telegram lengkap dengan fallback jika ada ralat entiti format."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message_text,
+        "parse_mode": "Markdown"
+    }
+    res = requests.post(url, json=payload, timeout=10)
+    data = res.json()
+    
+    # Fallback: Sekiranya Telegram gagal memproses simbol markdown (*, _, `), hantar sebagai teks biasa
+    if not data.get("ok"):
+        payload.pop("parse_mode", None)
+        res = requests.post(url, json=payload, timeout=10)
+        data = res.json()
+        
+    return data
 
 # =========================================================
 # 4. PENGKALAN DATA PRODUK ASAS (DEFAULT KNOWLEDGE)
@@ -107,7 +128,7 @@ if "content_history" not in st.session_state:
     st.session_state.content_history = []
 
 # =========================================================
-# 6. SIDEBAR: PUSAT KAWALAN & EKSTRAK PDF KE SUPABASE
+# 6. SIDEBAR: PUSAT KAWALAN & MUAT NAIK PDF
 # =========================================================
 st.sidebar.title("🎛️ Pusat Kawalan Produk")
 selected_product = st.sidebar.selectbox("Pilih Produk:", list(DEFAULT_KNOWLEDGE.keys()))
@@ -145,7 +166,7 @@ if uploaded_pdf is not None:
                     mime_type="application/pdf"
                 )
                 
-                st.write("2. Memproses dokumen dengan Gemini 3.1 Flash-Lite...")
+                st.write("2. Mengekstrak fakta rasmi produk...")
                 extract_prompt = f"""
                 Bedah dokumen PDF ini untuk produk {selected_product}:
                 1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
@@ -201,12 +222,10 @@ if st.sidebar.button("Log Keluar"):
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
-# Bina konteks pangkalan data yang lengkap
 knowledge_context = f"Maklumat Asas Produk:\n{json.dumps(base_info, ensure_ascii=False, indent=2)}\n"
 if saved_db_doc and saved_db_doc.get("extracted_content"):
     knowledge_context += f"\nMaklumat Tambahan daripada Dokumen Rasmi ({saved_db_doc.get('pdf_name')}):\n{saved_db_doc['extracted_content']}"
 
-# Semak laporan L1 yang tersimpan di Supabase
 persisted_l1_research = saved_db_doc.get("l1_research") if saved_db_doc else None
 
 # ---------------------------------------------------------
@@ -260,7 +279,6 @@ if btn_research:
                 system_instruction=system_prompt_research
             )
             
-            # SIMPAN KEKAL KE SUPABASE
             supabase.table("product_knowledge").upsert({
                 "product_name": selected_product,
                 "l1_research": research_result
@@ -327,7 +345,6 @@ btn_content = st.button("Jana Draf Iklan Baru (L2 & L3) 🚀", type="primary", u
 
 if btn_content:
     try:
-        # Gunakan laporan L1 jika ada, atau maklumkan fallback
         l1_source_text = persisted_l1_research if persisted_l1_research else "Tiada laporan L1 terdahulu. Rujuk fakta teras produk sepenuhnya."
 
         platform_tasks = []
@@ -342,9 +359,9 @@ if btn_content:
         tasks_text = "\n".join(platform_tasks)
 
         # ---------------------------------------------------------
-        # LANGKAH 1: Content Agent (L2) - Mengunci DB + L1
+        # LANGKAH 1: Content Agent (L2)
         # ---------------------------------------------------------
-        with st.spinner(f"Content Agent sedang mengarang (Merujuk Database & L1)..."):
+        with st.spinner("Content Agent sedang mengarang (Merujuk Database & L1)..."):
             content_prompt = f"""
             Produk: {selected_product}
             Tema Kempen: {selected_theme}
@@ -357,7 +374,7 @@ if btn_content:
             {knowledge_context}
 
             =======================================================
-            SUMBER RUJUKAN 2: STRATEGI KAJIAN PASARAN L1 (JIKA ADA)
+            SUMBER RUJUKAN 2: STRATEGI KAJIAN PASARAN L1
             =======================================================
             {l1_source_text}
 
@@ -379,7 +396,7 @@ if btn_content:
             )
 
         # ---------------------------------------------------------
-        # LANGKAH 2: QA & Auto-Correction Agent (L3) - Mengunci DB + Compliance
+        # LANGKAH 2: QA & Auto-Correction Agent (L3)
         # ---------------------------------------------------------
         with st.spinner("QA Agent sedang mengaudit & menyediakan versi siap sedia siar..."):
             qa_prompt = f"""
@@ -393,7 +410,7 @@ if btn_content:
 
             Tugasan QA:
             1. Sediakan Laporan Audit Integriti (Skor 1-10, semakan fakta mengikut database, semakan overclaim, dan ulasan penambahbaikan).
-            2. TULIS SEMULA (REWRITE) draf iklan di atas menjadi versi yang telah dibaiki 100% (bebas overclaim, nada lebih meyakinkan, format kemas, sedia untuk terus disiarkan).
+            2. TULIS SEMULA (REWRITE) draf iklan di atas menjadi versi yang telah dibaiki 100% (bebas overclaim, nada meyakinkan, format kemas, sedia untuk terus disiarkan).
 
             Format Output Wajib:
             Tulis laporan audit dahulu, kemudian letakkan pemisah tepat '===REVISED_COPY===' dan sertakan salinan iklan yang telah dibaiki sepenuhnya selepas pemisah tersebut.
@@ -432,9 +449,9 @@ if btn_content:
     except Exception as e:
         st.error(f"❌ Ralat Penjanaan Kandungan: {str(e)}")
 
-# ---------------------------------------------------------
-# PAPARAN ARKIB (3 TAB DENGAN BUTANG COPY & TELEGRAM)
-# ---------------------------------------------------------
+# =========================================================
+# 8. PAPARAN ARKIB (3 TAB DENGAN COPY & TELEGRAM)
+# =========================================================
 if st.session_state.content_history:
     st.markdown("---")
     st.subheader("📂 Arkib Draf Iklan & Versi Siap Audit")
@@ -450,14 +467,14 @@ if st.session_state.content_history:
                 "⚖️ Laporan QA & Integriti (L3)"
             ])
             
-            # 1. TAB SALINAN SIAP (DENGAN BUTANG COPY & TELEGRAM)
+            # TAB 1: SALINAN SIAP AUDIT (DENGAN BUTANG COPY & TELEGRAM)
             with tab_final:
                 st.info("💡 Klik ikon salin (copy) di penjuru atas kanan kotak teks di bawah, atau hantar terus ke Telegram.")
                 
                 # Kotak ini ada fungsi butang copy automatik Streamlit
                 st.code(item["content_corrected"], language=None)
                 
-                # Butang tindakan pantas
+                # Butang Tindakan Pantas
                 col_act1, col_act2 = st.columns([1.5, 3])
                 with col_act1:
                     if st.button("📲 Hantar ke Telegram", key=f"btn_tele_{i}", use_container_width=True):
@@ -465,35 +482,26 @@ if st.session_state.content_history:
                         tele_chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
                         
                         if tele_token and tele_chat_id:
-                            try:
-                                import requests
-                                tele_url = f"https://api.telegram.org/bot{tele_token}/sendMessage"
-                                tele_text = (
-                                    f"🚀 *DRAF IKLAN SIAP AUDIT ({item['product']})*\n\n"
-                                    f"📌 *Tema:* {item['theme']}\n"
-                                    f"📱 *Platform:* {item['platform']}\n\n"
-                                    f"{item['content_corrected']}"
-                                )
-                                res = requests.post(
-                                    tele_url, 
-                                    json={"chat_id": tele_chat_id, "text": tele_text, "parse_mode": "Markdown"},
-                                    timeout=10
-                                ).json()
-                                
-                                if res.get("ok"):
-                                    st.success("✅ Berjaya dihantar ke Telegram!")
-                                else:
-                                    st.error(f"Gagal hantar: {res.get('description')}")
-                            except Exception as err:
-                                st.error(f"Ralat sambungan Telegram: {err}")
+                            tele_text = (
+                                f"🚀 *DRAF IKLAN SIAP AUDIT ({item['product']})*\n\n"
+                                f"📌 *Tema:* {item['theme']}\n"
+                                f"📱 *Platform:* {item['platform']}\n\n"
+                                f"{item['content_corrected']}"
+                            )
+                            res = send_telegram_message(tele_token, tele_chat_id, tele_text)
+                            
+                            if res.get("ok"):
+                                st.success("✅ Berjaya dihantar ke Telegram!")
+                            else:
+                                st.error(f"Gagal hantar: {res.get('description')}")
                         else:
                             st.warning("⚠️ Sila tetapkan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID dalam Streamlit Secrets.")
 
-            # 2. TAB DRAF ASAL (L2)
+            # TAB 2: DRAF ASAL (L2)
             with tab_copy:
                 st.markdown(item["content_original"])
 
-            # 3. TAB LAPORAN AUDIT QA (L3)
+            # TAB 3: LAPORAN AUDIT QA (L3)
             with tab_audit:
                 st.markdown(item["qa_report"])
                 
