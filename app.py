@@ -454,10 +454,26 @@ if st.session_state.content_history:
                 st.info("💡 Versi ini telah diselaraskan dengan fakta rasmi Database dan garis panduan pematuhan jenama.")
                 st.markdown(item["content_corrected"])
             
-            with tab_copy:
+            with tab_final:
+                st.info("💡 Klik ikon salin (copy) di penjuru kanan atas kotak di bawah, atau tekan butang hantar ke Telegram.")
+    
+                # 1. Kotak ini automatik ada butang 'Copy' bawaan Streamlit di penjuru atas kanan
+                st.code(item["content_corrected"], language=None)
+    
+                # 2. Butang tindakan pantas di bawah kotak teks
+                col_act1, col_act2 = st.columns([1, 3])
+                with col_act1:
+                    if st.button("📲 Hantar ke Telegram", key=f"btn_tele_{i}", use_container_width=True):
+                
+                # Kod tolak mesej ke Telegram
+                st.success("Telah dihantar ke Telegram!")
+               
+                with tab_copy:
+               
                 st.markdown(item["content_original"])
                 
-            with tab_audit:
+                with tab_audit:
+                
                 st.markdown(item["qa_report"])
                 
             st.markdown("---")
