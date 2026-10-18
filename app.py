@@ -433,7 +433,7 @@ if btn_content:
         st.error(f"❌ Ralat Penjanaan Kandungan: {str(e)}")
 
 # ---------------------------------------------------------
-# PAPARAN ARKIB (3 TAB)
+# PAPARAN ARKIB (3 TAB DENGAN BUTANG COPY & TELEGRAM)
 # ---------------------------------------------------------
 if st.session_state.content_history:
     st.markdown("---")
@@ -450,30 +450,51 @@ if st.session_state.content_history:
                 "⚖️ Laporan QA & Integriti (L3)"
             ])
             
+            # 1. TAB SALINAN SIAP (DENGAN BUTANG COPY & TELEGRAM)
             with tab_final:
-                st.info("💡 Versi ini telah diselaraskan dengan fakta rasmi Database dan garis panduan pematuhan jenama.")
-                st.markdown(item["content_corrected"])
-            
-            with tab_final:
-                st.info("💡 Klik ikon salin (copy) di penjuru kanan atas kotak di bawah, atau tekan butang hantar ke Telegram.")
-    
-                # 1. Kotak ini automatik ada butang 'Copy' bawaan Streamlit di penjuru atas kanan
+                st.info("💡 Klik ikon salin (copy) di penjuru atas kanan kotak teks di bawah, atau hantar terus ke Telegram.")
+                
+                # Kotak ini ada fungsi butang copy automatik Streamlit
                 st.code(item["content_corrected"], language=None)
-    
-                # 2. Butang tindakan pantas di bawah kotak teks
-                col_act1, col_act2 = st.columns([1, 3])
+                
+                # Butang tindakan pantas
+                col_act1, col_act2 = st.columns([1.5, 3])
                 with col_act1:
                     if st.button("📲 Hantar ke Telegram", key=f"btn_tele_{i}", use_container_width=True):
-                
-                # Kod tolak mesej ke Telegram
-                st.success("Telah dihantar ke Telegram!")
-               
-                with tab_copy:
-               
+                        tele_token = st.secrets.get("TELEGRAM_BOT_TOKEN")
+                        tele_chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
+                        
+                        if tele_token and tele_chat_id:
+                            try:
+                                import requests
+                                tele_url = f"https://api.telegram.org/bot{tele_token}/sendMessage"
+                                tele_text = (
+                                    f"🚀 *DRAF IKLAN SIAP AUDIT ({item['product']})*\n\n"
+                                    f"📌 *Tema:* {item['theme']}\n"
+                                    f"📱 *Platform:* {item['platform']}\n\n"
+                                    f"{item['content_corrected']}"
+                                )
+                                res = requests.post(
+                                    tele_url, 
+                                    json={"chat_id": tele_chat_id, "text": tele_text, "parse_mode": "Markdown"},
+                                    timeout=10
+                                ).json()
+                                
+                                if res.get("ok"):
+                                    st.success("✅ Berjaya dihantar ke Telegram!")
+                                else:
+                                    st.error(f"Gagal hantar: {res.get('description')}")
+                            except Exception as err:
+                                st.error(f"Ralat sambungan Telegram: {err}")
+                        else:
+                            st.warning("⚠️ Sila tetapkan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID dalam Streamlit Secrets.")
+
+            # 2. TAB DRAF ASAL (L2)
+            with tab_copy:
                 st.markdown(item["content_original"])
-                
-                with tab_audit:
-                
+
+            # 3. TAB LAPORAN AUDIT QA (L3)
+            with tab_audit:
                 st.markdown(item["qa_report"])
                 
             st.markdown("---")
