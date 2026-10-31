@@ -5,20 +5,6 @@ from supabase import create_client, Client
 import json
 import time
 import requests
-import time
-from google.api_core.exceptions import ServiceUnavailable
-
-def generate_with_retry(prompt, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            # Kod panggilan API anda di sini
-            # response = model.generate_content(prompt)
-            # return response.text
-            pass
-        except ServiceUnavailable as e:
-            print(f"Percubaan {attempt + 1} gagal akibat pelayan sibuk. Cuba semula dalam beberapa saat...")
-            time.sleep(2 ** attempt) # Masa menunggu bertambah secara beransur-ansur
-    raise Exception("Gagal selepas beberapa percubaan kerana pelayan sesak.")
 
 # =========================================================
 # 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN)
@@ -65,17 +51,28 @@ MODEL_NAME = "gemini-3.1-flash-lite"
 # =========================================================
 # 3. FUNGSI UTILITI AI & TELEGRAM
 # =========================================================
-def call_gemini(contents, system_instruction=None):
+def call_gemini(contents, system_instruction=None, max_retries=3):
+    """Panggil Gemini dengan cubaan semula automatik jika server Google sibuk (503)."""
     config = types.GenerateContentConfig()
     if system_instruction:
         config.system_instruction = system_instruction
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=contents,
-        config=config
-    )
-    return response.text
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=contents,
+                config=config
+            )
+            return response.text
+        except Exception as e:
+            # Jika ralat 503 (server sibuk), tunggu dan cuba lagi
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3
+                    time.sleep(wait_time)
+                    continue
+            raise e
 
 def send_telegram_message(bot_token, chat_id, message_text):
     """Hantar mesej ke Telegram lengkap dengan fallback jika ada ralat entiti format."""
@@ -88,7 +85,7 @@ def send_telegram_message(bot_token, chat_id, message_text):
     res = requests.post(url, json=payload, timeout=10)
     data = res.json()
     
-    # Fallback: Sekiranya Telegram gagal memproses simbol markdown (*, _, `), hantar sebagai teks biasa
+    # Fallback: Sekiranya simbol markdown gagal diproses Telegram, hantar sebagai teks biasa
     if not data.get("ok"):
         payload.pop("parse_mode", None)
         res = requests.post(url, json=payload, timeout=10)
@@ -97,7 +94,7 @@ def send_telegram_message(bot_token, chat_id, message_text):
     return data
 
 # =========================================================
-# 4. PENGKALAN DATA PRODUK ASAS (DEFAULT KNOWLEDGE)
+# 4. PENGKALAN DATA PRODUK ASAS & FUNGSI SUPABASE
 # =========================================================
 DEFAULT_KNOWLEDGE = {
     "Tone Wow": {
@@ -127,6 +124,7 @@ DEFAULT_KNOWLEDGE = {
 }
 
 def get_saved_knowledge(product_name):
+    """Tarik rekod dokumen dan L1 produk terpilih daripada Supabase."""
     try:
         res = supabase.table("product_knowledge").select("*").eq("product_name", product_name).execute()
         if res.data and len(res.data) > 0:
@@ -134,6 +132,14 @@ def get_saved_knowledge(product_name):
     except Exception as e:
         st.sidebar.error(f"Ralat capaian pangkalan data: {e}")
     return None
+
+def get_all_uploaded_docs():
+    """Tarik senarai semua produk yang mempunyai fail PDF di Supabase untuk paparan senarai."""
+    try:
+        res = supabase.table("product_knowledge").select("product_name, pdf_name, updated_at, l1_research").execute()
+        return res.data if res.data else []
+    except Exception:
+        return []
 
 # =========================================================
 # 5. INISIALISASI SESI
@@ -180,7 +186,7 @@ if uploaded_pdf is not None:
                     mime_type="application/pdf"
                 )
                 
-                st.write("2. Mengekstrak fakta rasmi produk...")
+                st.write("2. Mengekstrak fakta rasmi produk (Flash-Lite)...")
                 extract_prompt = f"""
                 Bedah dokumen PDF ini untuk produk {selected_product}:
                 1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
@@ -215,6 +221,23 @@ if uploaded_pdf is not None:
             
         except Exception as e:
             st.sidebar.error(f"❌ Ralat semasa proses: {str(e)}")
+
+# WIDGET: SENARAI SEMUA FAIL PDF DI SUPABASE
+st.sidebar.markdown("---")
+with st.sidebar.expander("📂 Senarai Fail PDF di Database", expanded=True):
+    all_docs = get_all_uploaded_docs()
+    active_docs = [d for d in all_docs if d.get("pdf_name")]
+    
+    if active_docs:
+        for doc in active_docs:
+            p_name = doc.get("product_name", "-")
+            f_name = doc.get("pdf_name", "Tiada nama fail")
+            has_l1 = "✅ L1 Sedia" if doc.get("l1_research") else "⏳ L1 Belum"
+            
+            st.markdown(f"**• {p_name}**")
+            st.caption(f"📄 `{f_name}` | {has_l1}")
+    else:
+        st.caption("Belum ada sebarang fail PDF dimuat naik ke Supabase.")
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("🤖 Status Model AI"):
@@ -293,6 +316,7 @@ if btn_research:
                 system_instruction=system_prompt_research
             )
             
+            # Simpan rekod L1 kekal di Supabase
             supabase.table("product_knowledge").upsert({
                 "product_name": selected_product,
                 "l1_research": research_result
