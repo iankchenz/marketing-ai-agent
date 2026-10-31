@@ -5,6 +5,20 @@ from supabase import create_client, Client
 import json
 import time
 import requests
+import time
+from google.api_core.exceptions import ServiceUnavailable
+
+def generate_with_retry(prompt, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            # Kod panggilan API anda di sini
+            # response = model.generate_content(prompt)
+            # return response.text
+            pass
+        except ServiceUnavailable as e:
+            print(f"Percubaan {attempt + 1} gagal akibat pelayan sibuk. Cuba semula dalam beberapa saat...")
+            time.sleep(2 ** attempt) # Masa menunggu bertambah secara beransur-ansur
+    raise Exception("Gagal selepas beberapa percubaan kerana pelayan sesak.")
 
 # =========================================================
 # 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN)
