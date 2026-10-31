@@ -5,6 +5,8 @@ from supabase import create_client, Client
 import json
 import time
 import requests
+import io
+from pypdf import PdfReader
 
 # =========================================================
 # 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN)
@@ -45,26 +47,37 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Model Kuota Percuma 500 Panggilan Sehari
-MODEL_NAME = "gemini-3.1-flash-lite"
-
-# =========================================================
-# 3. FUNGSI UTILITI AI & TELEGRAM
-# =========================================================
+# Konfigurasi Model AI (Primary & Fallback)
 PRIMARY_MODEL = "gemini-3.1-flash-lite"
-FALLBACK_MODEL = "gemini-2.5-flash"  # Model sandaran jika 3.1 sesak
+FALLBACK_MODEL = "gemini-3.8-flash"
 
-def call_gemini(contents, system_instruction=None, max_retries=4):
+# =========================================================
+# 3. FUNGSI UTILITI AI, PDF & TELEGRAM
+# =========================================================
+def extract_text_from_pdf_bytes(pdf_bytes):
+    """Ekstrak teks PDF secara lokal untuk jimat bandwidth & cegah ralat 503."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        extracted_text = ""
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                extracted_text += t + "\n"
+        return extracted_text.strip()
+    except Exception:
+        return ""
+
+def call_gemini(contents, system_instruction=None, max_retries=3):
     """
-    Panggil Gemini dengan sistem auto-retry bertingkat.
-    Jika model utama 503 berterusan, automatik tukar ke model fallback.
+    Panggil Gemini dengan sokongan auto-retry bertingkat.
+    Tukar automatik ke FALLBACK_MODEL jika PRIMARY_MODEL mengalami kesesakan pelayan.
     """
     config = types.GenerateContentConfig()
     if system_instruction:
         config.system_instruction = system_instruction
 
     models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
-    last_error = None
+    last_err = None
 
     for model_name in models_to_try:
         for attempt in range(max_retries):
@@ -76,22 +89,35 @@ def call_gemini(contents, system_instruction=None, max_retries=4):
                 )
                 return response.text
             except Exception as e:
-                last_error = e
+                last_err = e
                 err_msg = str(e)
-                
-                # Kesan ralat 503 (Server sibuk) atau 429 (Rate limit)
-                if any(err_code in err_msg for err_code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                # Kesan ralat server sesak (503) atau had kuota (429)
+                if any(k in err_msg for k in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
                     if attempt < max_retries - 1:
-                        # Tunggu bertingkat: 3s -> 6s -> 9s
-                        wait_time = (attempt + 1) * 3
-                        time.sleep(wait_time)
+                        time.sleep((attempt + 1) * 3)
                         continue
-                else:
-                    # Jika ralat lain (bukan server sesak), lepaskan terus ralat
-                    raise e
-                    
-    # Jika kedua-dua model gagal selepas semua cubaan
-    raise last_error
+                # Jika model tiada/lapuk (cth: 404), terus tukar ke model seterusnya
+                break
+
+    raise last_err
+
+def send_telegram_message(bot_token, chat_id, message_text):
+    """Hantar mesej ke Telegram dengan fallback automatik jika sintaks markdown ralat."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message_text,
+        "parse_mode": "Markdown"
+    }
+    res = requests.post(url, json=payload, timeout=10)
+    data = res.json()
+    
+    if not data.get("ok"):
+        payload.pop("parse_mode", None)
+        res = requests.post(url, json=payload, timeout=10)
+        data = res.json()
+        
+    return data
 
 # =========================================================
 # 4. PENGKALAN DATA PRODUK ASAS & FUNGSI SUPABASE
@@ -124,7 +150,7 @@ DEFAULT_KNOWLEDGE = {
 }
 
 def get_product_documents(product_name):
-    """Ambil semua fail PDF dan ekstrak teks yang tersimpan bagi produk ini."""
+    """Ambil semua dokumen tersimpan bagi produk ini dari jadual product_documents."""
     try:
         res = supabase.table("product_documents")\
             .select("*")\
@@ -137,7 +163,7 @@ def get_product_documents(product_name):
         return []
 
 def get_all_uploaded_docs_summary():
-    """Ambil ringkasan semua dokumen untuk senarai global di sidebar."""
+    """Ambil senarai semua fail dokumen merentas produk untuk paparan ringkasan."""
     try:
         res = supabase.table("product_documents")\
             .select("product_name, pdf_name, created_at")\
@@ -148,7 +174,7 @@ def get_all_uploaded_docs_summary():
         return []
 
 def get_saved_l1_research(product_name):
-    """Ambil laporan L1 tersimpan dari product_knowledge."""
+    """Ambil dokumen strategi L1 yang tersimpan dalam jadual product_knowledge."""
     try:
         res = supabase.table("product_knowledge").select("l1_research").eq("product_name", product_name).execute()
         if res.data and len(res.data) > 0:
@@ -183,16 +209,16 @@ if current_docs:
 else:
     st.sidebar.info(f"ℹ️ Belum ada fail PDF untuk {selected_product}.")
 
-# UPLOAD BERBILANG FAIL (MULTIPLE FILES)
+# Widget Muat Naik Berbilang Fail PDF
 uploaded_pdfs = st.sidebar.file_uploader(
     f"Pilih fail PDF baharu ({selected_product})", 
     type=["pdf"],
     accept_multiple_files=True,
-    help="Pilih satu atau beberapa fail PDF serentak"
+    help="Boleh pilih satu atau beberapa fail PDF serentak"
 )
 
 if uploaded_pdfs:
-    st.sidebar.caption(f"📁 {len(uploaded_pdfs)} fail sedia diproses.")
+    st.sidebar.caption(f"📁 {len(uploaded_pdfs)} fail dipilih sedia untuk diproses.")
     
     if st.sidebar.button("🚀 Hantar & Simpan Semua PDF", type="primary", use_container_width=True):
         try:
@@ -201,24 +227,33 @@ if uploaded_pdfs:
                     st.write(f"Mengekstrak ({idx+1}/{len(uploaded_pdfs)}): `{pdf_file.name}`...")
                     
                     pdf_bytes = pdf_file.getvalue()
-                    pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+                    
+                    # 1. Ekstrak teks secara lokal dahulu untuk menjimatkan saiz data
+                    local_text = extract_text_from_pdf_bytes(pdf_bytes)
                     
                     extract_prompt = f"""
-                    Bedah dokumen PDF ini untuk produk {selected_product}:
+                    Bedah dokumen ini untuk produk {selected_product}:
                     1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
                     2. CORE VALUE / USP: 3 nilai teras yang membezakan produk ini daripada pesaing.
-                    3. DEMOGRAFIK & SASARAN AVATAR: Siapa prospek utama di Malaysia?
+                    3. DEMOGRAFIK & SASARAN AVATAR: Siapa sasaran pelanggan utama di Malaysia?
                     4. TERMA KRITIKAL & PANTANG LARANG: Syarat kelayakan dan perkara yang dilarang salah faham.
                     
-                    Tulis fakta padat tanpa ayat promosi kosong.
+                    Hasilkan rumusan dalam poin fakta padat tanpa ayat promosi kosong.
                     """
                     
+                    # 2. Jika ada teks lokal, hantar teks sahaja (sangat ringan). Jika imej/scan, guna Part.from_bytes.
+                    if local_text and len(local_text) > 100:
+                        ai_payload = f"Teks Dokumen:\n{local_text}\n\nArahan:\n{extract_prompt}"
+                    else:
+                        pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+                        ai_payload = [pdf_part, extract_prompt]
+
                     extracted_text = call_gemini(
-                        contents=[pdf_part, extract_prompt],
+                        contents=ai_payload,
                         system_instruction="Awak ialah Data Auditor yang mengekstrak fakta produk secara tepat dan objektif."
                     )
                     
-                    # Simpan sebagai rekod baharu tanpa replace rekod lama
+                    # Simpan sebagai baris baharu dalam jadual product_documents
                     supabase.table("product_documents").insert({
                         "product_name": selected_product,
                         "pdf_name": pdf_file.name,
@@ -234,7 +269,7 @@ if uploaded_pdfs:
         except Exception as e:
             st.sidebar.error(f"❌ Ralat semasa proses: {str(e)}")
 
-# WIDGET: SENARAI SEMUA FAIL DI SUPABASE (RENTAS PRODUK)
+# Arkib Ringkasan Semua Fail PDF
 st.sidebar.markdown("---")
 with st.sidebar.expander("📂 Arkib Semua Dokumen di Database", expanded=False):
     all_summary = get_all_uploaded_docs_summary()
@@ -247,8 +282,9 @@ with st.sidebar.expander("📂 Arkib Semua Dokumen di Database", expanded=False)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("🤖 Status Model AI"):
-    st.write(f"**Model Aktif:** `{MODEL_NAME}`")
-    st.caption("Pelan Kuota: 500 permintaan sehari (Percuma).")
+    st.write(f"**Primary:** `{PRIMARY_MODEL}`")
+    st.write(f"**Fallback:** `{FALLBACK_MODEL}`")
+    st.caption("Pelan Kuota: 500 permintaan percuma setiap hari.")
 
 base_info = DEFAULT_KNOWLEDGE[selected_product]
 with st.sidebar.expander("📌 Info Asas Sistem (Default)"):
@@ -265,7 +301,7 @@ if st.sidebar.button("Log Keluar"):
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
-# Gabungkan fakta asas + teks daripada SEMUA dokumen aktif produk
+# Gabungkan fakta asas bersama teks daripada kesemua dokumen aktif produk
 pdf_knowledge_blocks = []
 for d in current_docs:
     pdf_knowledge_blocks.append(f"--- Rujukan Dokumen: {d['pdf_name']} ---\n{d['extracted_content']}")
@@ -408,10 +444,8 @@ if btn_content:
 
         tasks_text = "\n".join(platform_tasks)
 
-        # ---------------------------------------------------------
         # LANGKAH 1: Content Agent (L2)
-        # ---------------------------------------------------------
-        with st.spinner("Content Agent sedang mengarang (Merujuk Semua Fail Dokumen & L1)..."):
+        with st.spinner("Content Agent sedang mengarang (Merujuk Semua Dokumen & L1)..."):
             content_prompt = f"""
             Produk: {selected_product}
             Tema Kempen: {selected_theme}
@@ -445,9 +479,7 @@ if btn_content:
                 system_instruction=content_instruction
             )
 
-        # ---------------------------------------------------------
         # LANGKAH 2: QA & Auto-Correction Agent (L3)
-        # ---------------------------------------------------------
         with st.spinner("QA Agent sedang mengaudit & menyediakan versi siap sedia siar..."):
             qa_prompt = f"""
             Produk: {selected_product}
@@ -521,6 +553,7 @@ if st.session_state.content_history:
             with tab_final:
                 st.info("💡 Klik ikon salin (copy) di penjuru atas kanan kotak teks di bawah, atau hantar terus ke Telegram.")
                 
+                # Kotak ini ada butang copy automatik
                 st.code(item["content_corrected"], language=None)
                 
                 col_act1, col_act2 = st.columns([1.5, 3])
