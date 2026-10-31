@@ -51,44 +51,47 @@ MODEL_NAME = "gemini-3.1-flash-lite"
 # =========================================================
 # 3. FUNGSI UTILITI AI & TELEGRAM
 # =========================================================
-def call_gemini(contents, system_instruction=None, max_retries=3):
-    """Panggil Gemini dengan cubaan semula automatik jika pelayan Google mengalami ralat 503."""
+PRIMARY_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = "gemini-2.5-flash"  # Model sandaran jika 3.1 sesak
+
+def call_gemini(contents, system_instruction=None, max_retries=4):
+    """
+    Panggil Gemini dengan sistem auto-retry bertingkat.
+    Jika model utama 503 berterusan, automatik tukar ke model fallback.
+    """
     config = types.GenerateContentConfig()
     if system_instruction:
         config.system_instruction = system_instruction
 
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=contents,
-                config=config
-            )
-            return response.text
-        except Exception as e:
-            if "503" in str(e) or "UNAVAILABLE" in str(e):
-                if attempt < max_retries - 1:
-                    time.sleep((attempt + 1) * 3)
-                    continue
-            raise e
+    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
+    last_error = None
 
-def send_telegram_message(bot_token, chat_id, message_text):
-    """Hantar mesej ke Telegram dengan fallback jika parsing markdown gagal."""
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message_text,
-        "parse_mode": "Markdown"
-    }
-    res = requests.post(url, json=payload, timeout=10)
-    data = res.json()
-    
-    if not data.get("ok"):
-        payload.pop("parse_mode", None)
-        res = requests.post(url, json=payload, timeout=10)
-        data = res.json()
-        
-    return data
+    for model_name in models_to_try:
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config
+                )
+                return response.text
+            except Exception as e:
+                last_error = e
+                err_msg = str(e)
+                
+                # Kesan ralat 503 (Server sibuk) atau 429 (Rate limit)
+                if any(err_code in err_msg for err_code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                    if attempt < max_retries - 1:
+                        # Tunggu bertingkat: 3s -> 6s -> 9s
+                        wait_time = (attempt + 1) * 3
+                        time.sleep(wait_time)
+                        continue
+                else:
+                    # Jika ralat lain (bukan server sesak), lepaskan terus ralat
+                    raise e
+                    
+    # Jika kedua-dua model gagal selepas semua cubaan
+    raise last_error
 
 # =========================================================
 # 4. PENGKALAN DATA PRODUK ASAS & FUNGSI SUPABASE
