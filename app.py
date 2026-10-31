@@ -52,7 +52,7 @@ MODEL_NAME = "gemini-3.1-flash-lite"
 # 3. FUNGSI UTILITI AI & TELEGRAM
 # =========================================================
 def call_gemini(contents, system_instruction=None, max_retries=3):
-    """Panggil Gemini dengan cubaan semula automatik jika server Google sibuk (503)."""
+    """Panggil Gemini dengan cubaan semula automatik jika pelayan Google mengalami ralat 503."""
     config = types.GenerateContentConfig()
     if system_instruction:
         config.system_instruction = system_instruction
@@ -66,16 +66,14 @@ def call_gemini(contents, system_instruction=None, max_retries=3):
             )
             return response.text
         except Exception as e:
-            # Jika ralat 503 (server sibuk), tunggu dan cuba lagi
             if "503" in str(e) or "UNAVAILABLE" in str(e):
                 if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 3
-                    time.sleep(wait_time)
+                    time.sleep((attempt + 1) * 3)
                     continue
             raise e
 
 def send_telegram_message(bot_token, chat_id, message_text):
-    """Hantar mesej ke Telegram lengkap dengan fallback jika ada ralat entiti format."""
+    """Hantar mesej ke Telegram dengan fallback jika parsing markdown gagal."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -85,7 +83,6 @@ def send_telegram_message(bot_token, chat_id, message_text):
     res = requests.post(url, json=payload, timeout=10)
     data = res.json()
     
-    # Fallback: Sekiranya simbol markdown gagal diproses Telegram, hantar sebagai teks biasa
     if not data.get("ok"):
         payload.pop("parse_mode", None)
         res = requests.post(url, json=payload, timeout=10)
@@ -123,23 +120,39 @@ DEFAULT_KNOWLEDGE = {
     }
 }
 
-def get_saved_knowledge(product_name):
-    """Tarik rekod dokumen dan L1 produk terpilih daripada Supabase."""
+def get_product_documents(product_name):
+    """Ambil semua fail PDF dan ekstrak teks yang tersimpan bagi produk ini."""
     try:
-        res = supabase.table("product_knowledge").select("*").eq("product_name", product_name).execute()
-        if res.data and len(res.data) > 0:
-            return res.data[0]
+        res = supabase.table("product_documents")\
+            .select("*")\
+            .eq("product_name", product_name)\
+            .order("created_at", desc=True)\
+            .execute()
+        return res.data if res.data else []
     except Exception as e:
-        st.sidebar.error(f"Ralat capaian pangkalan data: {e}")
-    return None
+        st.sidebar.error(f"Ralat capaian fail: {e}")
+        return []
 
-def get_all_uploaded_docs():
-    """Tarik senarai semua produk yang mempunyai fail PDF di Supabase untuk paparan senarai."""
+def get_all_uploaded_docs_summary():
+    """Ambil ringkasan semua dokumen untuk senarai global di sidebar."""
     try:
-        res = supabase.table("product_knowledge").select("product_name, pdf_name, updated_at, l1_research").execute()
+        res = supabase.table("product_documents")\
+            .select("product_name, pdf_name, created_at")\
+            .order("created_at", desc=True)\
+            .execute()
         return res.data if res.data else []
     except Exception:
         return []
+
+def get_saved_l1_research(product_name):
+    """Ambil laporan L1 tersimpan dari product_knowledge."""
+    try:
+        res = supabase.table("product_knowledge").select("l1_research").eq("product_name", product_name).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0].get("l1_research")
+    except Exception as e:
+        st.sidebar.error(f"Ralat capaian L1: {e}")
+    return None
 
 # =========================================================
 # 5. INISIALISASI SESI
@@ -148,96 +161,86 @@ if "content_history" not in st.session_state:
     st.session_state.content_history = []
 
 # =========================================================
-# 6. SIDEBAR: PUSAT KAWALAN & MUAT NAIK PDF
+# 6. SIDEBAR: PUSAT KAWALAN & MULTIPLE PDF UPLOAD
 # =========================================================
 st.sidebar.title("🎛️ Pusat Kawalan Produk")
 selected_product = st.sidebar.selectbox("Pilih Produk:", list(DEFAULT_KNOWLEDGE.keys()))
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Pangkalan Pengetahuan Produk")
+st.sidebar.subheader("📄 Pangkalan Dokumen Produk")
 
-saved_db_doc = get_saved_knowledge(selected_product)
+current_docs = get_product_documents(selected_product)
 
-if saved_db_doc and saved_db_doc.get("pdf_name"):
-    st.sidebar.success(f"💾 Dokumen Aktif di Database:\n**{saved_db_doc['pdf_name']}**")
-    with st.sidebar.expander("Lihat Ringkasan dari Database"):
-        st.caption(f"Dikemaskini pada: {saved_db_doc.get('updated_at', '-')}")
-        st.write(saved_db_doc.get('extracted_content', 'Tiada ringkasan'))
+if current_docs:
+    st.sidebar.success(f"💾 {len(current_docs)} Dokumen Tersimpan ({selected_product}):")
+    for d in current_docs:
+        with st.sidebar.expander(f"📄 {d['pdf_name']}"):
+            st.caption(f"Dimuat naik: {d.get('created_at', '-')[:10]}")
+            st.write(d.get("extracted_content", "Tiada kandungan"))
 else:
-    st.sidebar.info(f"ℹ️ Belum ada fail PDF disimpan untuk {selected_product}. Menggunakan maklumat asas.")
+    st.sidebar.info(f"ℹ️ Belum ada fail PDF untuk {selected_product}.")
 
-uploaded_pdf = st.sidebar.file_uploader(
+# UPLOAD BERBILANG FAIL (MULTIPLE FILES)
+uploaded_pdfs = st.sidebar.file_uploader(
     f"Pilih fail PDF baharu ({selected_product})", 
     type=["pdf"],
-    help="Pilih fail dokumen spesifikasi produk rasmi"
+    accept_multiple_files=True,
+    help="Pilih satu atau beberapa fail PDF serentak"
 )
 
-if uploaded_pdf is not None:
-    file_size_kb = len(uploaded_pdf.getvalue()) / 1024
-    st.sidebar.caption(f"📁 Fail sedia: `{uploaded_pdf.name}` ({file_size_kb:.1f} KB)")
+if uploaded_pdfs:
+    st.sidebar.caption(f"📁 {len(uploaded_pdfs)} fail sedia diproses.")
     
-    if st.sidebar.button("🚀 Hantar & Simpan PDF ke Supabase", type="primary", use_container_width=True):
+    if st.sidebar.button("🚀 Hantar & Simpan Semua PDF", type="primary", use_container_width=True):
         try:
-            with st.sidebar.status("Sedang memproses & mengekstrak data...", expanded=True) as status_box:
-                st.write("1. Membaca data fail PDF...")
-                pdf_bytes = uploaded_pdf.getvalue()
-                pdf_part = types.Part.from_bytes(
-                    data=pdf_bytes,
-                    mime_type="application/pdf"
-                )
-                
-                st.write("2. Mengekstrak fakta rasmi produk (Flash-Lite)...")
-                extract_prompt = f"""
-                Bedah dokumen PDF ini untuk produk {selected_product}:
-                1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
-                2. CORE VALUE / USP: 3 nilai teras yang membezakan produk ini daripada pesaing.
-                3. DEMOGRAFIK & SASARAN AVATAR: Siapa prospek utama di Malaysia?
-                4. TERMA KRITIKAL & PANTANG LARANG: Syarat kelayakan dan perkara yang dilarang salah faham.
-                
-                Hasilkan rumusan dalam poin fakta padat tanpa ayat promosi kosong.
-                """
-                
-                response = client.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=[pdf_part, extract_prompt],
-                    config=types.GenerateContentConfig(
+            with st.sidebar.status("Sedang memproses dokumen...", expanded=True) as status_box:
+                for idx, pdf_file in enumerate(uploaded_pdfs):
+                    st.write(f"Mengekstrak ({idx+1}/{len(uploaded_pdfs)}): `{pdf_file.name}`...")
+                    
+                    pdf_bytes = pdf_file.getvalue()
+                    pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+                    
+                    extract_prompt = f"""
+                    Bedah dokumen PDF ini untuk produk {selected_product}:
+                    1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
+                    2. CORE VALUE / USP: 3 nilai teras yang membezakan produk ini daripada pesaing.
+                    3. DEMOGRAFIK & SASARAN AVATAR: Siapa prospek utama di Malaysia?
+                    4. TERMA KRITIKAL & PANTANG LARANG: Syarat kelayakan dan perkara yang dilarang salah faham.
+                    
+                    Tulis fakta padat tanpa ayat promosi kosong.
+                    """
+                    
+                    extracted_text = call_gemini(
+                        contents=[pdf_part, extract_prompt],
                         system_instruction="Awak ialah Data Auditor yang mengekstrak fakta produk secara tepat dan objektif."
                     )
-                )
-                extracted_text = response.text
-                
-                st.write("3. Menolak data kekal ke Supabase...")
-                supabase.table("product_knowledge").upsert({
-                    "product_name": selected_product,
-                    "pdf_name": uploaded_pdf.name,
-                    "extracted_content": extracted_text
-                }).execute()
-                
-                status_box.update(label="✅ Selesai disimpan ke Supabase!", state="complete", expanded=False)
+                    
+                    # Simpan sebagai rekod baharu tanpa replace rekod lama
+                    supabase.table("product_documents").insert({
+                        "product_name": selected_product,
+                        "pdf_name": pdf_file.name,
+                        "extracted_content": extracted_text
+                    }).execute()
+
+                status_box.update(label="✅ Semua fail berjaya diekstrak & disimpan!", state="complete", expanded=False)
             
-            st.sidebar.success(f"Tahniah! Dokumen `{uploaded_pdf.name}` kini kekal disimpan di Supabase.")
+            st.sidebar.success(f"Berjaya simpan {len(uploaded_pdfs)} fail ke Supabase!")
             time.sleep(1)
             st.rerun()
-            
+
         except Exception as e:
             st.sidebar.error(f"❌ Ralat semasa proses: {str(e)}")
 
-# WIDGET: SENARAI SEMUA FAIL PDF DI SUPABASE
+# WIDGET: SENARAI SEMUA FAIL DI SUPABASE (RENTAS PRODUK)
 st.sidebar.markdown("---")
-with st.sidebar.expander("📂 Senarai Fail PDF di Database", expanded=True):
-    all_docs = get_all_uploaded_docs()
-    active_docs = [d for d in all_docs if d.get("pdf_name")]
-    
-    if active_docs:
-        for doc in active_docs:
-            p_name = doc.get("product_name", "-")
-            f_name = doc.get("pdf_name", "Tiada nama fail")
-            has_l1 = "✅ L1 Sedia" if doc.get("l1_research") else "⏳ L1 Belum"
-            
-            st.markdown(f"**• {p_name}**")
-            st.caption(f"📄 `{f_name}` | {has_l1}")
+with st.sidebar.expander("📂 Arkib Semua Dokumen di Database", expanded=False):
+    all_summary = get_all_uploaded_docs_summary()
+    if all_summary:
+        for item in all_summary:
+            st.markdown(f"**• {item['product_name']}**")
+            st.caption(f"📄 `{item['pdf_name']}` ({item['created_at'][:10]})")
     else:
-        st.caption("Belum ada sebarang fail PDF dimuat naik ke Supabase.")
+        st.caption("Pangkalan data dokumen masih kosong.")
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("🤖 Status Model AI"):
@@ -259,11 +262,18 @@ if st.sidebar.button("Log Keluar"):
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
-knowledge_context = f"Maklumat Asas Produk:\n{json.dumps(base_info, ensure_ascii=False, indent=2)}\n"
-if saved_db_doc and saved_db_doc.get("extracted_content"):
-    knowledge_context += f"\nMaklumat Tambahan daripada Dokumen Rasmi ({saved_db_doc.get('pdf_name')}):\n{saved_db_doc['extracted_content']}"
+# Gabungkan fakta asas + teks daripada SEMUA dokumen aktif produk
+pdf_knowledge_blocks = []
+for d in current_docs:
+    pdf_knowledge_blocks.append(f"--- Rujukan Dokumen: {d['pdf_name']} ---\n{d['extracted_content']}")
 
-persisted_l1_research = saved_db_doc.get("l1_research") if saved_db_doc else None
+all_pdf_knowledge = "\n\n".join(pdf_knowledge_blocks)
+
+knowledge_context = f"Maklumat Asas Produk:\n{json.dumps(base_info, ensure_ascii=False, indent=2)}\n"
+if all_pdf_knowledge:
+    knowledge_context += f"\nMaklumat Tambahan daripada Dokumen Rasmi ({len(current_docs)} Fail):\n{all_pdf_knowledge}"
+
+persisted_l1_research = get_saved_l1_research(selected_product)
 
 # ---------------------------------------------------------
 # TAHAP 1: TEAM RESEARCH (KEKAL DI SUPABASE)
@@ -286,7 +296,7 @@ with col_r2:
 
 if btn_research:
     try:
-        with st.spinner("Research Agent sedang menganalisis pasaran & menyimpan ke Supabase..."):
+        with st.spinner("Research Agent sedang membedah pasaran & menyimpan ke Supabase..."):
             prompt_payload = f"""
             Produk: {selected_product}
             Pangkalan Pengetahuan Rasmi (Database):
@@ -316,7 +326,6 @@ if btn_research:
                 system_instruction=system_prompt_research
             )
             
-            # Simpan rekod L1 kekal di Supabase
             supabase.table("product_knowledge").upsert({
                 "product_name": selected_product,
                 "l1_research": research_result
@@ -399,7 +408,7 @@ if btn_content:
         # ---------------------------------------------------------
         # LANGKAH 1: Content Agent (L2)
         # ---------------------------------------------------------
-        with st.spinner("Content Agent sedang mengarang (Merujuk Database & L1)..."):
+        with st.spinner("Content Agent sedang mengarang (Merujuk Semua Fail Dokumen & L1)..."):
             content_prompt = f"""
             Produk: {selected_product}
             Tema Kempen: {selected_theme}
@@ -509,10 +518,8 @@ if st.session_state.content_history:
             with tab_final:
                 st.info("💡 Klik ikon salin (copy) di penjuru atas kanan kotak teks di bawah, atau hantar terus ke Telegram.")
                 
-                # Kotak ini ada fungsi butang copy automatik Streamlit
                 st.code(item["content_corrected"], language=None)
                 
-                # Butang Tindakan Pantas
                 col_act1, col_act2 = st.columns([1.5, 3])
                 with col_act1:
                     if st.button("📲 Hantar ke Telegram", key=f"btn_tele_{i}", use_container_width=True):
