@@ -47,9 +47,12 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Konfigurasi Model AI (Primary & Fallback)
-PRIMARY_MODEL = "gemini-3.1-flash-lite"
-FALLBACK_MODEL = "gemini-3.8-flash"
+# Senarai Model AI Mengikut Keutamaan (Auto-Fallback Kalis 503 & 404)
+MODEL_POOL = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-2.0-flash"
+]
 
 # =========================================================
 # 3. FUNGSI UTILITI AI, PDF & TELEGRAM
@@ -59,8 +62,10 @@ def extract_text_from_pdf_bytes(pdf_bytes):
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         extracted_text = ""
-        for page in reader.pages:
-            t = page.extract_text()
+        # Baca maksimum 15 muka surat pertama untuk mengelakkan token melimpah
+        max_pages = min(len(reader.pages), 15)
+        for i in range(max_pages):
+            t = reader.pages[i].extract_text()
             if t:
                 extracted_text += t + "\n"
         return extracted_text.strip()
@@ -68,18 +73,14 @@ def extract_text_from_pdf_bytes(pdf_bytes):
         return ""
 
 def call_gemini(contents, system_instruction=None, max_retries=3):
-    """
-    Panggil Gemini dengan sokongan auto-retry bertingkat.
-    Tukar automatik ke FALLBACK_MODEL jika PRIMARY_MODEL mengalami kesesakan pelayan.
-    """
+    """Panggil Gemini dengan pusingan model bertingkat jika berlaku ralat 503 atau 429."""
     config = types.GenerateContentConfig()
     if system_instruction:
         config.system_instruction = system_instruction
 
-    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
     last_err = None
 
-    for model_name in models_to_try:
+    for model_name in MODEL_POOL:
         for attempt in range(max_retries):
             try:
                 response = client.models.generate_content(
@@ -91,18 +92,16 @@ def call_gemini(contents, system_instruction=None, max_retries=3):
             except Exception as e:
                 last_err = e
                 err_msg = str(e)
-                # Kesan ralat server sesak (503) atau had kuota (429)
                 if any(k in err_msg for k in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
                     if attempt < max_retries - 1:
-                        time.sleep((attempt + 1) * 3)
+                        time.sleep((attempt + 1) * 2)
                         continue
-                # Jika model tiada/lapuk (cth: 404), terus tukar ke model seterusnya
                 break
 
     raise last_err
 
 def send_telegram_message(bot_token, chat_id, message_text):
-    """Hantar mesej ke Telegram dengan fallback automatik jika sintaks markdown ralat."""
+    """Hantar mesej ke Telegram dengan fallback jika parsing markdown gagal."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -150,7 +149,7 @@ DEFAULT_KNOWLEDGE = {
 }
 
 def get_product_documents(product_name):
-    """Ambil semua dokumen tersimpan bagi produk ini dari jadual product_documents."""
+    """Ambil semua fail dokumen tersimpan bagi produk ini."""
     try:
         res = supabase.table("product_documents")\
             .select("*")\
@@ -163,7 +162,7 @@ def get_product_documents(product_name):
         return []
 
 def get_all_uploaded_docs_summary():
-    """Ambil senarai semua fail dokumen merentas produk untuk paparan ringkasan."""
+    """Ambil senarai semua dokumen rentas produk untuk arkib sidebar."""
     try:
         res = supabase.table("product_documents")\
             .select("product_name, pdf_name, created_at")\
@@ -174,7 +173,7 @@ def get_all_uploaded_docs_summary():
         return []
 
 def get_saved_l1_research(product_name):
-    """Ambil dokumen strategi L1 yang tersimpan dalam jadual product_knowledge."""
+    """Ambil laporan L1 tersimpan dari jadual product_knowledge."""
     try:
         res = supabase.table("product_knowledge").select("l1_research").eq("product_name", product_name).execute()
         if res.data and len(res.data) > 0:
@@ -188,6 +187,9 @@ def get_saved_l1_research(product_name):
 # =========================================================
 if "content_history" not in st.session_state:
     st.session_state.content_history = []
+
+if "poster_history" not in st.session_state:
+    st.session_state.poster_history = []
 
 # =========================================================
 # 6. SIDEBAR: PUSAT KAWALAN & MULTIPLE PDF UPLOAD
@@ -209,7 +211,7 @@ if current_docs:
 else:
     st.sidebar.info(f"ℹ️ Belum ada fail PDF untuk {selected_product}.")
 
-# Widget Muat Naik Berbilang Fail PDF
+# Widget Muat Naik Berbilang Dokumen
 uploaded_pdfs = st.sidebar.file_uploader(
     f"Pilih fail PDF baharu ({selected_product})", 
     type=["pdf"],
@@ -218,58 +220,62 @@ uploaded_pdfs = st.sidebar.file_uploader(
 )
 
 if uploaded_pdfs:
-    st.sidebar.caption(f"📁 {len(uploaded_pdfs)} fail dipilih sedia untuk diproses.")
+    st.sidebar.caption(f"📁 {len(uploaded_pdfs)} fail dipilih sedia diproses.")
     
     if st.sidebar.button("🚀 Hantar & Simpan Semua PDF", type="primary", use_container_width=True):
-        try:
-            with st.sidebar.status("Sedang memproses dokumen...", expanded=True) as status_box:
-                for idx, pdf_file in enumerate(uploaded_pdfs):
-                    st.write(f"Mengekstrak ({idx+1}/{len(uploaded_pdfs)}): `{pdf_file.name}`...")
-                    
-                    pdf_bytes = pdf_file.getvalue()
-                    
-                    # 1. Ekstrak teks secara lokal dahulu untuk menjimatkan saiz data
-                    local_text = extract_text_from_pdf_bytes(pdf_bytes)
-                    
-                    extract_prompt = f"""
-                    Bedah dokumen ini untuk produk {selected_product}:
-                    1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
-                    2. CORE VALUE / USP: 3 nilai teras yang membezakan produk ini daripada pesaing.
-                    3. DEMOGRAFIK & SASARAN AVATAR: Siapa sasaran pelanggan utama di Malaysia?
-                    4. TERMA KRITIKAL & PANTANG LARANG: Syarat kelayakan dan perkara yang dilarang salah faham.
-                    
-                    Hasilkan rumusan dalam poin fakta padat tanpa ayat promosi kosong.
-                    """
-                    
-                    # 2. Jika ada teks lokal, hantar teks sahaja (sangat ringan). Jika imej/scan, guna Part.from_bytes.
+        with st.sidebar.status("Sedang memproses dokumen...", expanded=True) as status_box:
+            for idx, pdf_file in enumerate(uploaded_pdfs):
+                st.write(f"Mengekstrak ({idx+1}/{len(uploaded_pdfs)}): `{pdf_file.name}`...")
+                
+                pdf_bytes = pdf_file.getvalue()
+                local_text = extract_text_from_pdf_bytes(pdf_bytes)
+                
+                # Hadkan teks kepada 12,000 aksara terawal bagi meringankan beban AI
+                if len(local_text) > 12000:
+                    local_text = local_text[:12000] + "\n...[Teks diringkaskan untuk pengoptimuman token]..."
+
+                extract_prompt = f"""
+                Bedah dokumen ini untuk produk {selected_product}:
+                1. SENARAI PAKEJ & HARGA RASMI: Senaraikan pakej, kuota, dan harga tepat.
+                2. CORE VALUE / USP: 3 nilai teras yang membezakan produk ini daripada pesaing.
+                3. DEMOGRAFIK & SASARAN AVATAR: Siapa sasaran prospek utama di Malaysia?
+                4. TERMA KRITIKAL & PANTANG LARANG: Syarat kelayakan dan perkara yang dilarang salah faham.
+                
+                Hasilkan rumusan dalam poin fakta padat tanpa ayat promosi kosong.
+                """
+                
+                extracted_result = ""
+                try:
                     if local_text and len(local_text) > 100:
                         ai_payload = f"Teks Dokumen:\n{local_text}\n\nArahan:\n{extract_prompt}"
                     else:
                         pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
                         ai_payload = [pdf_part, extract_prompt]
 
-                    extracted_text = call_gemini(
+                    extracted_result = call_gemini(
                         contents=ai_payload,
                         system_instruction="Awak ialah Data Auditor yang mengekstrak fakta produk secara tepat dan objektif."
                     )
-                    
-                    # Simpan sebagai baris baharu dalam jadual product_documents
-                    supabase.table("product_documents").insert({
-                        "product_name": selected_product,
-                        "pdf_name": pdf_file.name,
-                        "extracted_content": extracted_text
-                    }).execute()
+                except Exception:
+                    # Penyelamat automatik jika pelayan Google sesak
+                    if local_text and len(local_text) > 50:
+                        extracted_result = f"[EKSTRAK TEKS TERUS]:\n\n{local_text}"
+                    else:
+                        extracted_result = f"Dokumen `{pdf_file.name}` didaftarkan secara rasmi."
 
-                status_box.update(label="✅ Semua fail berjaya diekstrak & disimpan!", state="complete", expanded=False)
-            
-            st.sidebar.success(f"Berjaya simpan {len(uploaded_pdfs)} fail ke Supabase!")
-            time.sleep(1)
-            st.rerun()
+                supabase.table("product_documents").insert({
+                    "product_name": selected_product,
+                    "pdf_name": pdf_file.name,
+                    "extracted_content": extracted_result
+                }).execute()
 
-        except Exception as e:
-            st.sidebar.error(f"❌ Ralat semasa proses: {str(e)}")
+            status_box.update(label="✅ Semua fail berjaya diproses & disimpan!", state="complete", expanded=False)
+        
+        st.sidebar.success(f"Berjaya simpan {len(uploaded_pdfs)} fail ke Supabase!")
+        time.sleep(1)
+        st.rerun()
 
-# Arkib Ringkasan Semua Fail PDF
+# Arkib Ringkasan Semua Dokumen
 st.sidebar.markdown("---")
 with st.sidebar.expander("📂 Arkib Semua Dokumen di Database", expanded=False):
     all_summary = get_all_uploaded_docs_summary()
@@ -282,9 +288,9 @@ with st.sidebar.expander("📂 Arkib Semua Dokumen di Database", expanded=False)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("🤖 Status Model AI"):
-    st.write(f"**Primary:** `{PRIMARY_MODEL}`")
-    st.write(f"**Fallback:** `{FALLBACK_MODEL}`")
-    st.caption("Pelan Kuota: 500 permintaan percuma setiap hari.")
+    st.write(f"**Model Utama:** `{MODEL_POOL[0]}`")
+    st.write(f"**Model Sandaran:** `{MODEL_POOL[1]}`, `{MODEL_POOL[2]}`")
+    st.caption("Sistem kuota percuma Google AI Studio.")
 
 base_info = DEFAULT_KNOWLEDGE[selected_product]
 with st.sidebar.expander("📌 Info Asas Sistem (Default)"):
@@ -301,7 +307,7 @@ if st.sidebar.button("Log Keluar"):
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
-# Gabungkan fakta asas bersama teks daripada kesemua dokumen aktif produk
+# Mengumpulkan teks rujukan daripada kesemua fail PDF produk aktif
 pdf_knowledge_blocks = []
 for d in current_docs:
     pdf_knowledge_blocks.append(f"--- Rujukan Dokumen: {d['pdf_name']} ---\n{d['extracted_content']}")
@@ -315,12 +321,12 @@ if all_pdf_knowledge:
 persisted_l1_research = get_saved_l1_research(selected_product)
 
 # ---------------------------------------------------------
-# TAHAP 1: TEAM RESEARCH (KEKAL DI SUPABASE)
+# TAHAP 1: TEAM RESEARCH (CROSS-CHECK DOKUMEN PDF SUPABASE)
 # ---------------------------------------------------------
 st.markdown("### 🔍 Tahap 1: Laporan Kajian Pasaran (Research Hub)")
 
 if persisted_l1_research:
-    st.success("✅ Laporan L1 sedia ada di Database! (L2 & L3 akan terus menggunakan rujukan ini)")
+    st.success("✅ Laporan L1 sedia ada di Database! (L2, L3 & Poster Generator merujuk fail ini secara automatik)")
 else:
     st.info("ℹ️ Belum ada laporan L1 tersimpan untuk produk ini di Database. Sila jana sekali untuk rujukan berterusan.")
 
@@ -335,29 +341,27 @@ with col_r2:
 
 if btn_research:
     try:
-        with st.spinner("Research Agent sedang membedah pasaran & menyimpan ke Supabase..."):
+        with st.spinner("Research Agent sedang membedah dokumen PDF & pasaran ke Supabase..."):
             prompt_payload = f"""
             Produk: {selected_product}
-            Pangkalan Pengetahuan Rasmi (Database):
+            Pangkalan Pengetahuan Rasmi (Database Dokumen PDF):
             {knowledge_context}
             
             Fokus Tambahan: {research_focus if research_focus else 'Kajian pasaran menyeluruh'}
             
             Tugasan Penyelidikan Mendalam:
-            1. PSIKOGRAFIK AVATAR: Analisis ketakutan (fears), keraguan (objections), dan matlamat hidup mereka di Malaysia.
+            1. PSIKOGRAFIK AVATAR: Analisis ketakutan (fears), keraguan (objections), dan matlamat hidup mereka di Malaysia berdasarkan tawaran dokumen PDF.
             2. 3 PAIN POINTS KRITIKAL: Terangkan masalah sebenar mereka dengan situasi realiti harian.
             3. 3 SUDUT PENDEKATAN (ANGLES): Cadangkan 3 sudut pemasaran unik yang menyentuh emosi berserta 1 cadangan 'Hook' pembuka bagi setiap sudut.
             """
 
             system_prompt_research = """
             Awak ialah Lead Market Strategist & Consumer Psychologist. 
-            Gunakan kerangka pemikiran mendalam (First-Principles Thinking).
-
+            Gunakan kerangka pemikiran First-Principles.
             Peraturan Analisis:
-            1. JANGAN tulis ayat umum, klise, atau berbunga-bunga.
-            2. Berikan analisis demografik dan psikografik yang spesifik untuk pasaran Malaysia (faktor gaji, kos sara hidup, gaya hidup).
-            3. Berikan 'Pain Points' sebenar yang menyentuh emosi pembeli (ketakutan, kerugian masa, pembaziran wang).
-            4. Setiap cadangan sudut pemasaran (Angle) MESTI disertakan dengan 'Hook' pembuka ayat yang kuat.
+            1. JANGAN tulis ayat klise atau umum.
+            2. Analisis demografik & psikografik spesifik pasaran Malaysia (kos sara hidup, gaji, beban harian).
+            3. Wajib selaraskan sudut hujah dengan fakta tepat daripada dokumen PDF rasmi.
             """
 
             research_result = call_gemini(
@@ -388,7 +392,8 @@ st.markdown("---")
 # ---------------------------------------------------------
 st.markdown("### ✍️ Tahap 2 & 3: Penjanaan Kandungan & Semakan QA Automatik")
 
-col_ui1, col_ui2, col_ui3 = st.columns([1.5, 1.2, 1.3])
+# 4 Kolum: Termasuk Pilihan Bilangan Bahan (1 - 5 Bahan)
+col_ui1, col_ui2, col_ui3, col_ui4 = st.columns([1.4, 1.1, 1.1, 0.7])
 
 with col_ui1:
     theme_type = st.selectbox(
@@ -427,6 +432,9 @@ with col_ui3:
         "Edukasi / Nilai Tambah (Tips Percuma & Kesedaran)"
     ])
 
+with col_ui4:
+    num_copies = st.selectbox("Jumlah Draf:", [1, 2, 3, 4, 5], index=0, help="Berapa bahan/variasi berbeza yang mahu dihasilkan serentak")
+
 btn_content = st.button("Jana Draf Iklan Baru (L2 & L3) 🚀", type="primary", use_container_width=True)
 
 if btn_content:
@@ -439,18 +447,20 @@ if btn_content:
         if platform_choice in ["X (Twitter) Sahaja", "Semua Platform (FB, X & Threads)"]:
             platform_tasks.append("- BEBENANG X / TWITTER: Tweet hook pembuka yang padat, 3 tweet isi bernilai, dan tweet penutup dengan CTA.")
         if platform_choice in ["Threads Sahaja", "Semua Platform (FB, X & Threads)"]:
-            platform_tasks.append("- SALINAN THREADS: Gaya perbualan santai / POV tempatan, mencetuskan interaksi/komen komuniti, dan CTA bersahaja.")
-        platform_tasks.append("- KONSEP VISUAL: 1 cadangan visual poster Canva atau prompt jana imej AI bersesuaian.")
+            platform_tasks.append("- SALINAN THREADS: Gaya perbualan santai / POV tempatan, mencetuskan interaksi komuniti, dan CTA bersahaja.")
 
         tasks_text = "\n".join(platform_tasks)
 
-        # LANGKAH 1: Content Agent (L2)
-        with st.spinner("Content Agent sedang mengarang (Merujuk Semua Dokumen & L1)..."):
+        # ---------------------------------------------------------
+        # LANGKAH 1: Content Agent (L2) - Mengarang N Variasi
+        # ---------------------------------------------------------
+        with st.spinner(f"Content Agent sedang mengarang {num_copies} variasi draf iklan..."):
             content_prompt = f"""
             Produk: {selected_product}
             Tema Kempen: {selected_theme}
             Pendekatan Pemasaran: {angle_choice}
             Platform Terlibat: {platform_choice}
+            Jumlah Variasi Diperlukan: TEPAT {num_copies} VARIASI BERBEZA
 
             =======================================================
             SUMBER RUJUKAN 1: FAKTA RASMI & DOKUMEN DATABASE SUPABASE
@@ -463,15 +473,20 @@ if btn_content:
             {l1_source_text}
 
             TUGASAN:
-            Hasilkan salinan iklan berkualiti tinggi berdasarkan Rujukan 1 & 2 di atas.
+            Hasilkan tepat {num_copies} variasi salinan iklan yang mempunyai sudut 'Hook' dan jalan cerita yang berbeza bagi setiap variasi.
+            Asingkan setiap variasi dengan tajuk pemisah yang jelas seperti:
+            ### --- VARIASI 1 ---
+            ### --- VARIASI 2 ---
+            
+            Bagi setiap variasi, sertakan platform berikut:
             {tasks_text}
             """
 
             content_instruction = """
             Awak ialah Senior Direct-Response Copywriter di Malaysia.
-            PENTING: Semua tawaran, harga, ciri produk, dan terma MESTI patuh kepada SUMBER RUJUKAN 1 (Database).
+            Semua tawaran, harga, ciri produk, dan terma MESTI patuh kepada Dokumen Database.
             Gunakan Bahasa Melayu yang hidup, santai, beremosi, dan relevan dengan budaya tempatan.
-            Hanya hasilkan kandungan bagi platform yang diminta sahaja.
+            Hanya hasilkan kandungan bagi platform yang diminta.
             """
 
             draft_text = call_gemini(
@@ -479,29 +494,32 @@ if btn_content:
                 system_instruction=content_instruction
             )
 
+        # ---------------------------------------------------------
         # LANGKAH 2: QA & Auto-Correction Agent (L3)
-        with st.spinner("QA Agent sedang mengaudit & menyediakan versi siap sedia siar..."):
+        # ---------------------------------------------------------
+        with st.spinner("QA Agent sedang mengaudit fakta & menyediakan versi siap sedia siar..."):
             qa_prompt = f"""
             Produk: {selected_product}
             Peraturan Pematuhan & Fakta Database:
             {knowledge_context}
 
             Platform Terlibat: {platform_choice}
+            Jumlah Variasi: {num_copies} Variasi
             Draf Iklan Asal (L2):
             {draft_text}
 
             Tugasan QA:
-            1. Sediakan Laporan Audit Integriti (Skor 1-10, semakan fakta mengikut database, semakan overclaim, dan ulasan penambahbaikan).
-            2. TULIS SEMULA (REWRITE) draf iklan di atas menjadi versi yang telah dibaiki 100% (bebas overclaim, nada meyakinkan, format kemas, sedia untuk terus disiarkan).
+            1. Sediakan Laporan Audit Integriti (Skor 1-10, semakan fakta dokumen, semakan overclaim bagi setiap variasi).
+            2. TULIS SEMULA (REWRITE) kesemua {num_copies} variasi di atas menjadi versi yang telah dibaiki 100% (bebas overclaim, nada meyakinkan, format kemas, sedia terus untuk disiarkan).
 
             Format Output Wajib:
-            Tulis laporan audit dahulu, kemudian letakkan pemisah tepat '===REVISED_COPY===' dan sertakan salinan iklan yang telah dibaiki sepenuhnya selepas pemisah tersebut.
+            Tulis laporan audit dahulu, kemudian letakkan pemisah tepat '===REVISED_COPY===' dan sertakan kesemua variasi iklan yang telah dibaiki sepenuhnya selepas pemisah tersebut.
             """
 
             qa_instruction = """
             Awak ialah Chief Compliance Officer merangkap Senior Editor. 
-            Semak draf iklan dengan merujuk ketat kepada Fakta Database.
-            Pastikan versi REVISED_COPY bebas daripada kesalahan fakta, tidak melanggar etika, dan sedia untuk terus disiarkan oleh peniaga.
+            Semak draf iklan dengan merujuk ketat kepada Fakta Dokumen Database.
+            Pastikan versi REVISED_COPY bebas daripada kesilapan fakta dan sedia untuk terus disiarkan.
             """
 
             raw_qa_output = call_gemini(
@@ -522,11 +540,12 @@ if btn_content:
             "theme": selected_theme,
             "platform": platform_choice,
             "angle": angle_choice,
+            "num_copies": num_copies,
             "content_original": draft_text,
             "qa_report": qa_report_text,
             "content_corrected": corrected_copy_text
         })
-        st.success("Kandungan berjaya dijana & diaudit mengikut dokumen Database!")
+        st.success(f"Berjaya menjana & mengaudit {num_copies} variasi kandungan!")
 
     except Exception as e:
         st.error(f"❌ Ralat Penjanaan Kandungan: {str(e)}")
@@ -536,11 +555,11 @@ if btn_content:
 # =========================================================
 if st.session_state.content_history:
     st.markdown("---")
-    st.subheader("📂 Arkib Draf Iklan & Versi Siap Audit")
+    st.subheader("📂 Arkib Draf Iklan & Salinan Siap Audit")
 
     for i, item in enumerate(st.session_state.content_history):
         with st.container():
-            st.markdown(f"#### 🏷️ #{len(st.session_state.content_history) - i} | [{item['product']}] {item['theme']}")
+            st.markdown(f"#### 🏷️ #{len(st.session_state.content_history) - i} | [{item['product']}] {item['theme']} ({item.get('num_copies', 1)} Bahan)")
             st.caption(f"📌 Platform: **{item['platform']}** | Gaya: **{item['angle']}**")
             
             tab_final, tab_copy, tab_audit = st.tabs([
@@ -549,11 +568,8 @@ if st.session_state.content_history:
                 "⚖️ Laporan QA & Integriti (L3)"
             ])
             
-            # TAB 1: SALINAN SIAP AUDIT (DENGAN BUTANG COPY & TELEGRAM)
             with tab_final:
                 st.info("💡 Klik ikon salin (copy) di penjuru atas kanan kotak teks di bawah, atau hantar terus ke Telegram.")
-                
-                # Kotak ini ada butang copy automatik
                 st.code(item["content_corrected"], language=None)
                 
                 col_act1, col_act2 = st.columns([1.5, 3])
@@ -578,12 +594,97 @@ if st.session_state.content_history:
                         else:
                             st.warning("⚠️ Sila tetapkan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID dalam Streamlit Secrets.")
 
-            # TAB 2: DRAF ASAL (L2)
             with tab_copy:
                 st.markdown(item["content_original"])
 
-            # TAB 3: LAPORAN AUDIT QA (L3)
             with tab_audit:
                 st.markdown(item["qa_report"])
                 
             st.markdown("---")
+
+# =========================================================
+# 9. TAHAP 4: STUDIO POSTER UNIVERSAL (CROSS-PLATFORM SINGLE FEED)
+# =========================================================
+if st.session_state.content_history:
+    st.markdown("### 🎨 Tahap 4: Studio Rekaan Poster Universal (Single Feed)")
+    st.caption("Jana konsep & blueprint rekaan visual yang sesuai disiarkan di semua media sosial (FB, IG, Threads, X) tanpa terpotong.")
+
+    # Pilih draf iklan daripada arkib untuk dijadikan asas poster
+    draft_options = [
+        f"#{len(st.session_state.content_history) - idx} - [{item['product']}] {item['theme']} ({item['platform']})"
+        for idx, item in enumerate(st.session_state.content_history)
+    ]
+    selected_draft_idx = st.selectbox("Pilih Salinan Iklan Sebagai Asas Poster:", range(len(draft_options)), format_func=lambda x: draft_options[x])
+    target_ad = st.session_state.content_history[selected_draft_idx]
+
+    col_pos_opt1, col_pos_opt2 = st.columns([2, 1])
+    with col_pos_opt1:
+        st.info("📐 **Piawaian Saiz:** Nisbah **Universal 1:1 (1080 x 1080 px)** atau **Portrait Feed 4:5 (1080 x 1350 px)** dengan kawasan selamat (*Safe Zone*) 10% di setiap penjuru.")
+    with col_pos_opt2:
+        btn_generate_poster = st.button("Jana Blueprint & Prompt Poster 🖼️", type="primary", use_container_width=True)
+
+    if btn_generate_poster:
+        try:
+            with st.spinner("Creative Art Director sedang mereka konsep visual universal..."):
+                poster_prompt = f"""
+                Produk: {target_ad['product']}
+                Piawaian Saiz: Universal Single Feed (1080x1080 px / 1:1 atau 1080x1350 px / 4:5)
+
+                =======================================================
+                SUMBER 1: FAKTA RASMI & DOKUMEN DATABASE
+                =======================================================
+                {knowledge_context}
+
+                =======================================================
+                SUMBER 2: STRATEGI PSIKOLOGI AVATAR L1
+                =======================================================
+                {persisted_l1_research if persisted_l1_research else 'Gunakan maklumat teras produk.'}
+
+                =======================================================
+                SUMBER 3: SALINAN IKLAN SIAP AUDIT L3
+                =======================================================
+                {target_ad['content_corrected']}
+
+                Tugasan Creative Director:
+                Hasilkan Blueprint Reka Bentuk Poster Pemasaran yang sedia untuk dibuat di Canva / Photoshop, dan prompt imej AI:
+                
+                1. SUSUN ATUR TEKS POSTER (CANVA-READY):
+                   - Hook / Headline Utama: Maksimum 5-6 patah perkataan yang sangat menonjol.
+                   - Sub-Headline: 1 ayat padat penerangan nilai / solusi berasaskan dokumen PDF.
+                   - Callout Badge / Pakej Tawaran: Pakej harga atau terma penting (contoh: 'Hanya RM30/bln', 'Tawaran Terhad').
+                   - Call To Action (CTA): Tindakan segera pada poster (contoh: 'Klik Pautan di Bio' / 'Dapatkan Sekarang').
+
+                2. HIERARKI VISUAL & PALET WARNA:
+                   - Skema Warna: 3 kod warna (Primary, Accent, Background) yang sesuai dengan emosi prospek.
+                   - Zon Selamat (Safe Zone): Panduan susun atur elemen agar tidak terpotong di feed telefon.
+
+                3. PROMPT GENERASI IMEJ AI (BAHASA INGGERIS):
+                   - Tulis 1 prompt berkualiti studio photorealistic / 3D commercial untuk Midjourney, Flux, atau Imagen.
+                   - Wajib fokus kepada latar belakang bersih dengan ruang negatif (negative space) untuk meletakkan teks, tanpa teks yang dijana oleh AI.
+                """
+
+                poster_instruction = """
+                Awak ialah Senior Creative Art Director khusus dalam reka bentuk poster komersial berkonversi tinggi di Malaysia.
+                Pastikan teks yang diletakkan pada poster sangat ringkas, padat, dan menepati fakta dokumen rasmi produk.
+                """
+
+                poster_result = call_gemini(
+                    contents=poster_prompt,
+                    system_instruction=poster_instruction
+                )
+
+                st.session_state.poster_history.insert(0, {
+                    "product": target_ad['product'],
+                    "theme": target_ad['theme'],
+                    "blueprint": poster_result
+                })
+                st.success("Blueprint poster berjaya dihasilkan!")
+
+        except Exception as e:
+            st.error(f"❌ Ralat Penjanaan Poster: {str(e)}")
+
+    if st.session_state.poster_history:
+        st.markdown("---")
+        for p_idx, p_item in enumerate(st.session_state.poster_history):
+            with st.expander(f"🖼️ Blueprint Poster #{len(st.session_state.poster_history) - p_idx} - [{p_item['product']}] {p_item['theme']}", expanded=(p_idx == 0)):
+                st.markdown(p_item["blueprint"])
