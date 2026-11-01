@@ -7,6 +7,7 @@ import time
 import requests
 import io
 from pypdf import PdfReader
+from PIL import Image
 
 # =========================================================
 # 1. TETAPAN HALAMAN & KESELAMATAN (LOGIN)
@@ -47,22 +48,22 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 client = genai.Client(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Senarai Model AI Mengikut Keutamaan (Auto-Fallback Kalis 503 & 404)
+# Senarai Model AI Mengikut Keutamaan (Auto-Fallback)
 MODEL_POOL = [
     "gemini-3.1-flash-lite",
     "gemini-3.8-flash",
     "gemini-2.0-flash"
 ]
+IMAGE_MODEL = "imagen-3.0-generate-002"
 
 # =========================================================
-# 3. FUNGSI UTILITI AI, PDF & TELEGRAM
+# 3. FUNGSI UTILITI AI, PDF, GAMBAR & TELEGRAM
 # =========================================================
 def extract_text_from_pdf_bytes(pdf_bytes):
     """Ekstrak teks PDF secara lokal untuk jimat bandwidth & cegah ralat 503."""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         extracted_text = ""
-        # Baca maksimum 15 muka surat pertama untuk mengelakkan token melimpah
         max_pages = min(len(reader.pages), 15)
         for i in range(max_pages):
             t = reader.pages[i].extract_text()
@@ -79,7 +80,6 @@ def call_gemini(contents, system_instruction=None, max_retries=3):
         config.system_instruction = system_instruction
 
     last_err = None
-
     for model_name in MODEL_POOL:
         for attempt in range(max_retries):
             try:
@@ -97,8 +97,26 @@ def call_gemini(contents, system_instruction=None, max_retries=3):
                         time.sleep((attempt + 1) * 2)
                         continue
                 break
-
     raise last_err
+
+def generate_visual_poster(prompt_text):
+    """Jana imej poster sebenar menggunakan Imagen 3."""
+    try:
+        response = client.models.generate_images(
+            model=IMAGE_MODEL,
+            prompt=prompt_text,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="1:1",
+                output_mime_type="image/png"
+            )
+        )
+        if response.generated_images:
+            image_bytes = response.generated_images[0].image.image_bytes
+            return Image.open(io.BytesIO(image_bytes))
+    except Exception as e:
+        st.error(f"⚠️ Ralat penjanaan imej Imagen 3: {e}")
+    return None
 
 def send_telegram_message(bot_token, chat_id, message_text):
     """Hantar mesej ke Telegram dengan fallback jika parsing markdown gagal."""
@@ -191,6 +209,9 @@ if "content_history" not in st.session_state:
 if "poster_history" not in st.session_state:
     st.session_state.poster_history = []
 
+if "pending_poster_trigger" not in st.session_state:
+    st.session_state.pending_poster_trigger = None
+
 # =========================================================
 # 6. SIDEBAR: PUSAT KAWALAN & MULTIPLE PDF UPLOAD
 # =========================================================
@@ -211,7 +232,6 @@ if current_docs:
 else:
     st.sidebar.info(f"ℹ️ Belum ada fail PDF untuk {selected_product}.")
 
-# Widget Muat Naik Berbilang Dokumen
 uploaded_pdfs = st.sidebar.file_uploader(
     f"Pilih fail PDF baharu ({selected_product})", 
     type=["pdf"],
@@ -230,7 +250,6 @@ if uploaded_pdfs:
                 pdf_bytes = pdf_file.getvalue()
                 local_text = extract_text_from_pdf_bytes(pdf_bytes)
                 
-                # Hadkan teks kepada 12,000 aksara terawal bagi meringankan beban AI
                 if len(local_text) > 12000:
                     local_text = local_text[:12000] + "\n...[Teks diringkaskan untuk pengoptimuman token]..."
 
@@ -257,7 +276,6 @@ if uploaded_pdfs:
                         system_instruction="Awak ialah Data Auditor yang mengekstrak fakta produk secara tepat dan objektif."
                     )
                 except Exception:
-                    # Penyelamat automatik jika pelayan Google sesak
                     if local_text and len(local_text) > 50:
                         extracted_result = f"[EKSTRAK TEKS TERUS]:\n\n{local_text}"
                     else:
@@ -288,16 +306,10 @@ with st.sidebar.expander("📂 Arkib Semua Dokumen di Database", expanded=False)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("🤖 Status Model AI"):
-    st.write(f"**Model Utama:** `{MODEL_POOL[0]}`")
-    st.write(f"**Model Sandaran:** `{MODEL_POOL[1]}`, `{MODEL_POOL[2]}`")
-    st.caption("Sistem kuota percuma Google AI Studio.")
+    st.write(f"**Model Teks:** `{MODEL_POOL[0]}`")
+    st.write(f"**Model Imej:** `{IMAGE_MODEL}`")
 
 base_info = DEFAULT_KNOWLEDGE[selected_product]
-with st.sidebar.expander("📌 Info Asas Sistem (Default)"):
-    st.write(f"**USP:** {base_info['usp']}")
-    st.write(f"**Sasaran:** {base_info['avatar']}")
-    st.write(f"**Pematuhan:** {base_info['compliance']}")
-
 if st.sidebar.button("Log Keluar"):
     st.session_state.authenticated = False
     st.rerun()
@@ -307,7 +319,6 @@ if st.sidebar.button("Log Keluar"):
 # =========================================================
 st.title(f"⚡ Command Center: {selected_product}")
 
-# Mengumpulkan teks rujukan daripada kesemua fail PDF produk aktif
 pdf_knowledge_blocks = []
 for d in current_docs:
     pdf_knowledge_blocks.append(f"--- Rujukan Dokumen: {d['pdf_name']} ---\n{d['extracted_content']}")
@@ -326,7 +337,7 @@ persisted_l1_research = get_saved_l1_research(selected_product)
 st.markdown("### 🔍 Tahap 1: Laporan Kajian Pasaran (Research Hub)")
 
 if persisted_l1_research:
-    st.success("✅ Laporan L1 sedia ada di Database! (L2, L3 & Poster Generator merujuk fail ini secara automatik)")
+    st.success("✅ Laporan L1 sedia ada di Database! (L2, L3 & Poster Studio merujuk fail ini secara automatik)")
 else:
     st.info("ℹ️ Belum ada laporan L1 tersimpan untuk produk ini di Database. Sila jana sekali untuk rujukan berterusan.")
 
@@ -360,7 +371,7 @@ if btn_research:
             Gunakan kerangka pemikiran First-Principles.
             Peraturan Analisis:
             1. JANGAN tulis ayat klise atau umum.
-            2. Analisis demografik & psikografik spesifik pasaran Malaysia (kos sara hidup, gaji, beban harian).
+            2. Analisis demografik & psikografik spesifik pasaran Malaysia.
             3. Wajib selaraskan sudut hujah dengan fakta tepat daripada dokumen PDF rasmi.
             """
 
@@ -392,7 +403,6 @@ st.markdown("---")
 # ---------------------------------------------------------
 st.markdown("### ✍️ Tahap 2 & 3: Penjanaan Kandungan & Semakan QA Automatik")
 
-# 4 Kolum: Termasuk Pilihan Bilangan Bahan (1 - 5 Bahan)
 col_ui1, col_ui2, col_ui3, col_ui4 = st.columns([1.4, 1.1, 1.1, 0.7])
 
 with col_ui1:
@@ -433,7 +443,7 @@ with col_ui3:
     ])
 
 with col_ui4:
-    num_copies = st.selectbox("Jumlah Draf:", [1, 2, 3, 4, 5], index=0, help="Berapa bahan/variasi berbeza yang mahu dihasilkan serentak")
+    num_copies = st.selectbox("Jumlah Draf:", [1, 2, 3, 4, 5], index=0)
 
 btn_content = st.button("Jana Draf Iklan Baru (L2 & L3) 🚀", type="primary", use_container_width=True)
 
@@ -451,9 +461,6 @@ if btn_content:
 
         tasks_text = "\n".join(platform_tasks)
 
-        # ---------------------------------------------------------
-        # LANGKAH 1: Content Agent (L2) - Mengarang N Variasi
-        # ---------------------------------------------------------
         with st.spinner(f"Content Agent sedang mengarang {num_copies} variasi draf iklan..."):
             content_prompt = f"""
             Produk: {selected_product}
@@ -494,9 +501,6 @@ if btn_content:
                 system_instruction=content_instruction
             )
 
-        # ---------------------------------------------------------
-        # LANGKAH 2: QA & Auto-Correction Agent (L3)
-        # ---------------------------------------------------------
         with st.spinner("QA Agent sedang mengaudit fakta & menyediakan versi siap sedia siar..."):
             qa_prompt = f"""
             Produk: {selected_product}
@@ -510,16 +514,16 @@ if btn_content:
 
             Tugasan QA:
             1. Sediakan Laporan Audit Integriti (Skor 1-10, semakan fakta dokumen, semakan overclaim bagi setiap variasi).
-            2. TULIS SEMULA (REWRITE) kesemua {num_copies} variasi di atas menjadi versi yang telah dibaiki 100% (bebas overclaim, nada meyakinkan, format kemas, sedia terus untuk disiarkan).
+            2. TULIS SEMULA (REWRITE) draf iklan di atas menjadi versi yang telah dibaiki 100% (bebas overclaim, nada meyakinkan, format kemas, sedia terus untuk disiarkan).
 
             Format Output Wajib:
-            Tulis laporan audit dahulu, kemudian letakkan pemisah tepat '===REVISED_COPY===' dan sertakan kesemua variasi iklan yang telah dibaiki sepenuhnya selepas pemisah tersebut.
+            Tulis laporan audit dahulu, kemudian letakkan pemisah tepat '===REVISED_COPY===' dan sertakan iklan yang telah dibaiki sepenuhnya selepas pemisah tersebut.
             """
 
             qa_instruction = """
             Awak ialah Chief Compliance Officer merangkap Senior Editor. 
             Semak draf iklan dengan merujuk ketat kepada Fakta Dokumen Database.
-            Pastikan versi REVISED_COPY bebas daripada kesilapan fakta dan sedia untuk terus disiarkan.
+            Pastikan versi REVISED_COPY bebas daripada kesalahan fakta dan sedia untuk terus disiarkan.
             """
 
             raw_qa_output = call_gemini(
@@ -551,7 +555,7 @@ if btn_content:
         st.error(f"❌ Ralat Penjanaan Kandungan: {str(e)}")
 
 # =========================================================
-# 8. PAPARAN ARKIB (3 TAB DENGAN COPY & TELEGRAM)
+# 8. PAPARAN ARKIB (DENGAN BUTANG TELEGRAM & GENERATE POSTER)
 # =========================================================
 if st.session_state.content_history:
     st.markdown("---")
@@ -569,10 +573,11 @@ if st.session_state.content_history:
             ])
             
             with tab_final:
-                st.info("💡 Klik ikon salin (copy) di penjuru atas kanan kotak teks di bawah, atau hantar terus ke Telegram.")
+                st.info("💡 Klik ikon salin di kotak teks, hantar terus ke Telegram, atau tolak ke Studio Poster.")
                 st.code(item["content_corrected"], language=None)
                 
-                col_act1, col_act2 = st.columns([1.5, 3])
+                # Susun Butang: Telegram + Generate Poster Bersebelahan
+                col_act1, col_act2, col_act3 = st.columns([1.5, 2.0, 2.5])
                 with col_act1:
                     if st.button("📲 Hantar ke Telegram", key=f"btn_tele_{i}", use_container_width=True):
                         tele_token = st.secrets.get("TELEGRAM_BOT_TOKEN")
@@ -594,6 +599,12 @@ if st.session_state.content_history:
                         else:
                             st.warning("⚠️ Sila tetapkan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID dalam Streamlit Secrets.")
 
+                with col_act2:
+                    # Butang Lompat ke Tahap 4 & Jana Poster Mengikut Draf Ini
+                    if st.button("🎨 Jana Poster (Tahap 4)", key=f"btn_poster_jump_{i}", type="secondary", use_container_width=True):
+                        st.session_state.pending_poster_trigger = item
+                        st.rerun()
+
             with tab_copy:
                 st.markdown(item["content_original"])
 
@@ -603,88 +614,117 @@ if st.session_state.content_history:
             st.markdown("---")
 
 # =========================================================
-# 9. TAHAP 4: STUDIO POSTER UNIVERSAL (CROSS-PLATFORM SINGLE FEED)
+# 9. TAHAP 4: STUDIO REKAAN POSTER UNIVERSAL (STANDALONE + DIRECT JUMP)
 # =========================================================
-if st.session_state.content_history:
-    st.markdown("### 🎨 Tahap 4: Studio Rekaan Poster Universal (Single Feed)")
-    st.caption("Jana konsep & blueprint rekaan visual yang sesuai disiarkan di semua media sosial (FB, IG, Threads, X) tanpa terpotong.")
+# HTML Anchor untuk sokongan lompatan automatik
+st.markdown('<div id="tahap-4"></div>', unsafe_allow_html=True)
+st.markdown("### 🎨 Tahap 4: Studio Rekaan Poster Universal (Single Feed)")
+st.caption("Jana konsep, blueprint & poster pemasaran visual secara terus (Segi empat sama 1:1) tanpa perlu tunggu draf L3.")
 
-    # Pilih draf iklan daripada arkib untuk dijadikan asas poster
-    draft_options = [
-        f"#{len(st.session_state.content_history) - idx} - [{item['product']}] {item['theme']} ({item['platform']})"
-        for idx, item in enumerate(st.session_state.content_history)
-    ]
-    selected_draft_idx = st.selectbox("Pilih Salinan Iklan Sebagai Asas Poster:", range(len(draft_options)), format_func=lambda x: draft_options[x])
-    target_ad = st.session_state.content_history[selected_draft_idx]
+# Semak jika ada arahan jana poster yang dicetuskan oleh butang di Tab Draf L3
+auto_ad_target = st.session_state.get("pending_poster_trigger")
 
-    col_pos_opt1, col_pos_opt2 = st.columns([2, 1])
-    with col_pos_opt1:
-        st.info("📐 **Piawaian Saiz:** Nisbah **Universal 1:1 (1080 x 1080 px)** atau **Portrait Feed 4:5 (1080 x 1350 px)** dengan kawasan selamat (*Safe Zone*) 10% di setiap penjuru.")
-    with col_pos_opt2:
-        btn_generate_poster = st.button("Jana Blueprint & Prompt Poster 🖼️", type="primary", use_container_width=True)
+if auto_ad_target:
+    st.info(f"⚡ **Memproses Poster daripada Draf:** [{auto_ad_target['product']}] {auto_ad_target['theme']}")
 
-    if btn_generate_poster:
-        try:
-            with st.spinner("Creative Art Director sedang mereka konsep visual universal..."):
-                poster_prompt = f"""
-                Produk: {target_ad['product']}
-                Piawaian Saiz: Universal Single Feed (1080x1080 px / 1:1 atau 1080x1350 px / 4:5)
+custom_creative_prompt = st.text_area(
+    "💬 Fokus Utama / Arahan Creative Poster (Sebut tema visual, warna atau tawaran khusus yang anda mahu):",
+    value=f"Fokus pada teks hook dan tawaran kempen: {auto_ad_target['theme']}" if auto_ad_target else "",
+    placeholder="Contoh: 'Buat poster bertemakan penjimatan, warna korporat biru dan jingga. Tunjukkan teks \"INTERNET RM35/BULAN\". Letak gambar orang Malaysia gembira.'"
+)
 
-                =======================================================
-                SUMBER 1: FAKTA RASMI & DOKUMEN DATABASE
-                =======================================================
-                {knowledge_context}
+btn_generate_image_poster = st.button("Jana Poster Visual Sebenar & Blueprint (1:1 Saiz Media Sosial) 🖼️", type="primary", use_container_width=True)
 
-                =======================================================
-                SUMBER 2: STRATEGI PSIKOLOGI AVATAR L1
-                =======================================================
-                {persisted_l1_research if persisted_l1_research else 'Gunakan maklumat teras produk.'}
+# Lakukan penjanaan jika butang manual ditekan ATAU dicetuskan secara automatik daripada butang draf iklan
+if btn_generate_image_poster or auto_ad_target:
+    trigger_product = auto_ad_target["product"] if auto_ad_target else selected_product
+    target_copy = auto_ad_target["content_corrected"] if auto_ad_target else ""
+    user_prompt_val = custom_creative_prompt.strip()
 
-                =======================================================
-                SUMBER 3: SALINAN IKLAN SIAP AUDIT L3
-                =======================================================
-                {target_ad['content_corrected']}
+    try:
+        with st.spinner(f"Creative Director & Imagen 3 sedang mereka poster untuk {trigger_product}..."):
+            blueprint_generation_prompt = f"""
+            Produk: {trigger_product}
+            Arahan Khas Pengguna: {user_prompt_val if user_prompt_val else 'Gunakan tema visual umum mengikut USP produk.'}
 
-                Tugasan Creative Director:
-                Hasilkan Blueprint Reka Bentuk Poster Pemasaran yang sedia untuk dibuat di Canva / Photoshop, dan prompt imej AI:
-                
-                1. SUSUN ATUR TEKS POSTER (CANVA-READY):
-                   - Hook / Headline Utama: Maksimum 5-6 patah perkataan yang sangat menonjol.
-                   - Sub-Headline: 1 ayat padat penerangan nilai / solusi berasaskan dokumen PDF.
-                   - Callout Badge / Pakej Tawaran: Pakej harga atau terma penting (contoh: 'Hanya RM30/bln', 'Tawaran Terhad').
-                   - Call To Action (CTA): Tindakan segera pada poster (contoh: 'Klik Pautan di Bio' / 'Dapatkan Sekarang').
+            RUJUKAN FAKTA PRODUK (PDF DATABASE):
+            {knowledge_context}
 
-                2. HIERARKI VISUAL & PALET WARNA:
-                   - Skema Warna: 3 kod warna (Primary, Accent, Background) yang sesuai dengan emosi prospek.
-                   - Zon Selamat (Safe Zone): Panduan susun atur elemen agar tidak terpotong di feed telefon.
+            RUJUKAN STRATEGI AUDIENS (L1):
+            {persisted_l1_research if persisted_l1_research else 'Fokus kepada prospek Malaysia.'}
 
-                3. PROMPT GENERASI IMEJ AI (BAHASA INGGERIS):
-                   - Tulis 1 prompt berkualiti studio photorealistic / 3D commercial untuk Midjourney, Flux, atau Imagen.
-                   - Wajib fokus kepada latar belakang bersih dengan ruang negatif (negative space) untuk meletakkan teks, tanpa teks yang dijana oleh AI.
-                """
+            RUJUKAN SALINAN IKLAN L3 (JIKA ADA):
+            {target_copy if target_copy else 'Gunakan maklumat dokumen rasmi sepenuhnya.'}
 
-                poster_instruction = """
-                Awak ialah Senior Creative Art Director khusus dalam reka bentuk poster komersial berkonversi tinggi di Malaysia.
-                Pastikan teks yang diletakkan pada poster sangat ringkas, padat, dan menepati fakta dokumen rasmi produk.
-                """
+            Tugasan Creative Director:
+            Hasilkan satu set arahan susun atur poster (Blueprint visual) yang mengandungi headline yang kuat, badge tawaran harga, dan CTA yang jelas.
+            """
 
-                poster_result = call_gemini(
-                    contents=poster_prompt,
-                    system_instruction=poster_instruction
-                )
+            blueprint_text = call_gemini(
+                contents=blueprint_generation_prompt,
+                system_instruction="Awak ialah Creative Design Strategist di agensi pengiklanan. Hasilkan susun atur teks komersial visual dan cadangan warna."
+            )
 
+            image_generation_prompt = f"""
+            Commercial designed ad poster, 1:1 square aspect ratio for the product "{trigger_product}" in Malaysia. High-end, clean, vibrant corporate marketing style.
+            The poster MUST feature prominent, easily readable big Malay text overlays:
+            - Big Bold Headline based on product USP: "JIMAT BESAR, KUOTA PADU!" (or suitable hook) related to {trigger_product}.
+            - Prominent Sub-text with accurate product offer and pricing based on the documents.
+            - Contrast badge saying: "Tawaran Terhad!" and CTA at the bottom "DAPATKAN SEKARANG!".
+            Include relevant visual motifs for "{trigger_product}" (e.g. happy Malaysians using smartphones, cash rewards, fast fiber network, AI tech icons, or e-commerce parcels).
+            Natural commercial background, premium lighting, graphic design elements (geometric overlays, badges, icons, border-safe layout). Safe zone respected, no text cutoff.
+            Text must be spelled clearly: "{trigger_product}". Custom instruction: {user_prompt_val}
+            Cinematic rendering, design studio style, social media ad graphic.
+            """
+
+            poster_image_obj = generate_visual_poster(image_generation_prompt)
+
+            if poster_image_obj:
                 st.session_state.poster_history.insert(0, {
-                    "product": target_ad['product'],
-                    "theme": target_ad['theme'],
-                    "blueprint": poster_result
+                    "product": trigger_product,
+                    "theme": auto_ad_target["theme"] if auto_ad_target else "Komersial Poster",
+                    "blueprint": blueprint_text,
+                    "image": poster_image_obj
                 })
-                st.success("Blueprint poster berjaya dihasilkan!")
+                # Kosongkan trigger sementara selepas selesai
+                st.session_state.pending_poster_trigger = None
+                st.success("Visual poster dan blueprint berjaya dihasilkan!")
+            else:
+                st.session_state.pending_poster_trigger = None
+                st.warning("Imej visual sedang sesak di pelayan Imagen, tetapi Blueprint susun atur teks sedia di bawah.")
 
-        except Exception as e:
-            st.error(f"❌ Ralat Penjanaan Poster: {str(e)}")
+    except Exception as e:
+        st.session_state.pending_poster_trigger = None
+        st.error(f"❌ Ralat Penjanaan Poster: {str(e)}")
 
-    if st.session_state.poster_history:
-        st.markdown("---")
-        for p_idx, p_item in enumerate(st.session_state.poster_history):
-            with st.expander(f"🖼️ Blueprint Poster #{len(st.session_state.poster_history) - p_idx} - [{p_item['product']}] {p_item['theme']}", expanded=(p_idx == 0)):
-                st.markdown(p_item["blueprint"])
+# Paparan Poster di bawah Tahap 4
+if st.session_state.poster_history:
+    st.markdown("---")
+    for p_idx, p_item in enumerate(st.session_state.poster_history):
+        with st.container():
+            st.markdown(f"#### 🏷️ Poster Visual #{len(st.session_state.poster_history) - p_idx} - [{p_item['product']}] {p_item.get('theme', '')}")
+            
+            col_pos_out1, col_pos_out2 = st.columns([1, 1])
+            with col_pos_out1:
+                if "image" in p_item and p_item["image"]:
+                    st.image(p_item["image"], use_container_width=True, caption=f"Imej Poster Penjanaan {p_item['product']} (1:1)")
+                    
+                    img_byte_arr = io.BytesIO()
+                    p_item["image"].save(img_byte_arr, format='PNG')
+                    img_byte_arr = img_byte_arr.getvalue()
+                    
+                    st.download_button(
+                        label="📥 Muat Turun Poster (PNG)",
+                        data=img_byte_arr,
+                        file_name=f"poster_{p_item['product']}_{p_idx+1}.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("Tiada fail imej berjaya dimuatkan.")
+
+            with col_pos_out2:
+                st.markdown("💡 **Blueprint Rekaan & Susun Atur**")
+                st.write(p_item["blueprint"])
+                
+            st.markdown("---")
